@@ -1,0 +1,2272 @@
+---
+title: "fcn_TLC"
+author: "Rachel Neil"
+date: "10/08/2023"
+output: html_document
+---
+
+# Preparations
+```{r Preperations}
+#| label: libraries
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: false
+
+library(tidyverse) #for data wrangling
+library(cmdstanr)   #for cmdstan
+library(brms)       #for fitting models in STAN
+library(standist)   #for visualizing distributions
+library(HDInterval) #for HPD intervals
+library(posterior)  #for posterior draws
+library(coda)       #for diagnostics
+library(bayesplot)  #for diagnostics
+library(ggmcmc)     #for MCMC diagnostics
+library(rstan)      #for interfacing with STAN
+library(effects)   #for partial effects plots
+library(car)       #for regression diagnostics
+library(broom)     #for tidy output
+library(ggfortify) #for model diagnostics
+library(sjPlot)    #for outputs
+library(knitr)     #for kable
+library(emmeans)   #for estimating marginal means
+library(MASS)      #for glm.nb
+library(MuMIn)     #for AICc
+library(tidybayes)
+library(broom.mixed)#for tidying MCMC outputs
+library(patchwork)  #for multiple plots
+library(ggeffects)
+library(DHARMa)
+library(ggridges)
+library(bayestestR) #for ROPE
+library(see)        #for some plots
+library(easystats)     #framework for stats, modelling and visualisation 
+library(dplyr)
+source('../helperFunctions.R')  
+``` 
+
+#Read in data
+```{r readData, results='markdown', eval=TRUE}
+data_TLC <- read_csv('../data/TLC_class_diets.csv', trim_ws = TRUE)
+
+data_TLC$tank_rep_rand <- paste(data_TLC$treatment, "_", data_TLC$replicate)
+
+data_TLC <- data_TLC |> mutate(treatment = factor(treatment),
+                       replicate = factor(replicate),  
+                       tank_rep_rand = factor(tank_rep_rand),  
+                       genotype = factor(genotype), 
+                       DAG = `12DAG`, 
+                       SS = Storage/Structural)  
+
+data_TLC_new <- data_TLC |> 
+  dplyr::mutate(Storage_new = SE+TAG+DAG+FFA) |> 
+  dplyr::mutate(Structural_new = 100 - Storage_new) |> 
+  dplyr::mutate(Store_TL_new = lipid_AFDW_mgg*(Storage_new/100), 
+                Struct_TL_new = lipid_AFDW_mgg*(Structural_new/100))
+
+coral_treats <- c('Control', 'Dissolved', 'Field', 'Fish', 'LiveFeeds', 'Mix', 'Pellets', 'SeaSim')
+coral_TLC <- data_TLC_new |> dplyr::filter(treatment %in% coral_treats) |> droplevels() 
+
+diets_treats <- c('Algae', 'Artemia', 'Pellets_D', 'Rotifers')
+diets_TLC <- data_TLC_new |> dplyr::filter(treatment %in% diets_treats) |> droplevels() 
+
+treatments_only <- c('Control', 'Dissolved', 'Fish', 'LiveFeeds', 'Mix', 'Pellets')
+```
+
+#Visualisation set-up
+```{r}
+#| label: Visualisation_set-up
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+group.colors <- c(Control = "#999999", Dissolved = "#E69F00", Fish = "#56B4E9", LiveFeeds = "#009E73", Mix = "#F0E442", Pellets = "#0072B2", Field = "#D55E00", SeaSim = "#CC79A7" )
+
+level_order_new <- c('Control','Pellets', 'LiveFeeds', 'Dissolved', 'Fish',  'Mix',  'Field', 'SeaSim') 
+```
+
+
+##SE
+####Priors model
+```{r}
+#| label: 1_se
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+
+se_form <- bf(SE ~ treatment + (1|tank_rep_rand:genotype), family = gaussian()) 
+
+coral_TLC |> group_by(treatment) |> summarise(median((SE)), mad((SE))) 
+
+se_priors <- prior(normal(10.9, 3), class = 'Intercept') + 
+  prior(normal(0, 6), class = 'b') + 
+  prior(student_t(3, 0, 3), class = 'sd') + 
+  prior(student_t(3, 0, 3), class = 'sigma') 
+
+se.brm1 <- brm(se_form, 
+                 data = coral_TLC,
+                 prior = se_priors, 
+                 sample_prior = 'only',
+                 iter = 5000, 
+                 warmup = 2500, 
+                 chains = 3, cores = 3, 
+                 thin = 10, 
+                 refresh = 0, 
+                 seed = 123, 
+                 control = list(adapt_delta = 0.99),
+                 backend = "cmdstan") 
+
+se.brm1 |> conditional_effects("treatment") |> plot(points = TRUE)   
+#OK
+```
+
+####With data 
+```{r}
+#| label: 2_se
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+
+se.brm2 <- se.brm1 |> update(sample_prior = "yes",
+                                       refresh = 0, 
+                                       iter = 7500,
+                                       warmup = 2500,
+                                       seed = 123) 
+
+se.brm2 |> conditional_effects("treatment") |> plot(points = TRUE)
+
+save(se.brm2, file = "../models/se.brm2.RData")
+
+load("../models/se.brm2.RData")
+
+```
+
+####MCMC sampling diagnostics
+```{r}
+#| label: 3_se
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true 
+pars <- se.brm2 |> get_variables()
+pars_2 <- str_extract(pars, '^b_.*|^shape*|^sd_.*|^sigma$') |> na.omit() 
+
+#Traceplots
+se.brm2$fit |> stan_trace(pars = pars_2, inc_warmup = TRUE)
+#Autocorrelation
+se.brm2$fit |> stan_ac(pars = pars_2) 
+#Rhat
+se.brm2$fit |> stan_rhat()
+#ESS
+se.brm2$fit |> stan_ess() 
+#Summary
+summary(se.brm2) 
+```
+
+####Posterior probablity checks
+```{r}
+#| label: 4_se
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+se.brm2 |> pp_check(type = 'dens_overlay', ndraws = 200) + theme_classic()
+#OK
+```
+
+
+####DHARMA residuals
+```{r}
+#| label: 5_se
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+coral.resids <- make_brms_dharma_res(se.brm2, integerResponse = FALSE)
+
+wrap_elements(~testUniformity(coral.resids)) + 
+  wrap_elements(~plotResiduals(coral.resids, quantreg = FALSE)) +
+  wrap_elements(~testDispersion(coral.resids))
+#OK
+```
+
+####Means
+```{r}
+#| label: 6_se
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+load("../models/se.brm2.RData")
+
+se.means_mgg <- se.brm2 |> 
+  emmeans(~treatment, type = 'response') |> 
+  as.data.frame() |> 
+  mutate(emmean = 10*emmean, 
+         lower.HPD = 10*lower.HPD, 
+         upper.HPD = 10*upper.HPD) 
+
+ggplot(data = se.means_mgg, aes(x=factor(treatment, levels = level_order_new), y = emmean, colour = treatment)) + 
+  geom_point(data = coral_TLC, aes(x = factor(treatment, levels = level_order_new), y = 10*SE), colour = "black", alpha = 0.5, size = 0.5, position = position_jitter(w = 0.1, h = 0))+
+  geom_pointrange(aes(ymin = lower.HPD, ymax = upper.HPD), fatten = 5) + 
+  theme_classic() +
+  theme(legend.position = "none", 
+        text = element_text(size=15, colour = "black"),
+        axis.text.y = element_text(colour = "black"), 
+        axis.text.x = element_text(colour = "black")) +
+  scale_x_discrete(labels = level_order_new, 
+                   expression(Treatment), 
+                   breaks = waiver()) + 
+  scale_y_continuous(expression(SE~(mg~g^-1~lipid)))+ 
+    scale_colour_manual(values=group.colors)
+
+```
+
+####Pairwise comparisons
+```{r}
+#| label: 7_se
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+sTreat <- se.brm2$data |> pull(treatment) |> levels()
+STreat <- rep(1, length(sTreat))
+names(STreat) <- sTreat
+
+se.brm2 |> emmeans(~treatment) |> 
+  gather_emmeans_draws() |>  
+  mutate(.value = (.value)) |> 
+  ungroup() |>
+  group_by(.draw) |> 
+  reframe(fit = data.frame(contrast = rownames(multcomp::contrMat(n = STreat, type = "Tukey")), 
+                           fit = t(as.vector(.value) %*% t(multcomp::contrMat(n = STreat, type = "Tukey"))))) |> 
+  unnest(fit) |> 
+  group_by(contrast) |> 
+  dplyr::summarise(median_hdci(fit),
+            Pl = mean(fit<0),
+            Pg = mean(fit>0)) 
+#absolute difference between the treatments
+```
+
+##TAG
+####Priors model
+```{r}
+#| label: 1_tag
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+
+tag_form <- bf(TAG ~ treatment + (1|tank_rep_rand:genotype), family = Gamma(link = "log")) 
+
+
+coral_TLC |> group_by(treatment) |> summarise(median(log(TAG)), mad(log(TAG))) 
+
+tag_priors <- prior(normal(1.8, 0.4), class = 'Intercept') + 
+  prior(normal(0, 1.5), class = 'b') + 
+  prior(student_t(3, 0, 0.4), class = 'sd') + 
+  prior(gamma(0.01, 0.01), class = 'shape')
+
+tag.brm1 <- brm(tag_form, 
+                 data = coral_TLC,
+                 prior = tag_priors, 
+                 sample_prior = 'only',
+                 iter = 5000, 
+                 warmup = 2500, 
+                 chains = 3, cores = 3, 
+                 thin = 10, 
+                 refresh = 0, 
+                 seed = 123, 
+                 control = list(adapt_delta = 0.99),
+                 backend = "cmdstan") 
+
+tag.brm1 |> conditional_effects("treatment") |> plot(points = TRUE)   
+#OK
+```
+
+####With data 
+```{r}
+#| label: 2_tag
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+
+tag.brm2 <- tag.brm1 |> update(sample_prior = "yes",
+                                       refresh = 0, 
+                                       iter = 7500,
+                                       warmup = 2500,
+                                       seed = 123) 
+
+tag.brm2 |> conditional_effects("treatment") |> plot(points = TRUE)
+
+save(tag.brm2, file = "../models/tag.brm2.RData")
+
+load("../models/tag.brm2.RData")
+
+```
+
+####MCMC sampling diagnostics
+```{r}
+#| label: 3_tag
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true 
+pars <- tag.brm2 |> get_variables()
+pars_2 <- str_extract(pars, '^b_.*|^shape*|^sd_.*|^sigma$') |> na.omit() 
+
+#Traceplots
+tag.brm2$fit |> stan_trace(pars = pars_2, inc_warmup = TRUE)
+#Autocorrelation
+tag.brm2$fit |> stan_ac(pars = pars_2) 
+#Rhat
+tag.brm2$fit |> stan_rhat()
+#ESS
+tag.brm2$fit |> stan_ess() 
+#Summary
+summary(tag.brm2) 
+```
+
+####Posterior probablity checks
+```{r}
+#| label: 4_tag
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+tag.brm2 |> pp_check(type = 'dens_overlay', ndraws = 200) + theme_classic()
+#OK
+```
+
+
+####DHARMA residuals
+```{r}
+#| label: 5_tag
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+coral.resids <- make_brms_dharma_res(tag.brm2, integerResponse = FALSE)
+
+wrap_elements(~testUniformity(coral.resids)) + 
+  wrap_elements(~plotResiduals(coral.resids, quantreg = FALSE)) +
+  wrap_elements(~testDispersion(coral.resids))
+#OK
+```
+
+####Means
+```{r}
+#| label: 6_tag
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+load("../models/tag.brm2.RData")
+
+tag.means_mmg <- tag.brm2 |> 
+  emmeans(~treatment, type = 'response') |> 
+  as.data.frame() |> 
+  mutate(response = 10*response, 
+         lower.HPD = 10*lower.HPD, 
+         upper.HPD = 10*upper.HPD) 
+
+ggplot(data = tag.means_mmg, aes(x=factor(treatment, levels = level_order_new), y = response, colour = treatment)) + 
+  geom_point(data = coral_TLC, aes(x = factor(treatment, levels = level_order_new), y = 10*TAG), colour = "black", alpha = 0.5, size = 0.5, position = position_jitter(w = 0.1, h = 0))+
+  geom_pointrange(aes(ymin = lower.HPD, ymax = upper.HPD), fatten = 5) + 
+  theme_classic() +
+  theme(legend.position = "none", 
+        text = element_text(size=15, colour = "black"),
+        axis.text.y = element_text(colour = "black"), 
+        axis.text.x = element_text(colour = "black")) +
+  scale_x_discrete(labels = level_order_new, 
+                   expression(Treatment), 
+                   breaks = waiver()) + 
+  scale_y_continuous(expression(TAG~(mg~g^-1~lipid)), 
+                     #limits = c(0,100)
+                     )+ 
+    scale_colour_manual(values=group.colors)
+
+```
+
+####Pairwise comparisons
+```{r}
+#| label: 7_tag
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+sTreat <- tag.brm2$data |> pull(treatment) |> levels()
+STreat <- rep(1, length(sTreat))
+names(STreat) <- sTreat
+
+tag.brm2 |> emmeans(~treatment) |> 
+  gather_emmeans_draws() |>  
+  mutate(.value = exp(.value)) |> 
+  ungroup() |>
+  group_by(.draw) |> 
+  reframe(fit = data.frame(contrast = rownames(multcomp::contrMat(n = STreat, type = "Tukey")), 
+                           fit = t(as.vector(.value) %*% t(multcomp::contrMat(n = STreat, type = "Tukey"))))) |> 
+  unnest(fit) |> 
+  group_by(contrast) |> 
+  dplyr::summarise(median_hdci(fit),
+            Pl = mean(fit<0),
+            Pg = mean(fit>0)) 
+#absolute difference between the treatments
+```
+
+##DAG
+####Priors model
+```{r}
+#| label: 1_dag
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+dag_form <- bf(DAG ~ treatment + (1|tank_rep_rand:genotype), family = gaussian(link = "identity"), sigma ~ treatment)  
+
+coral_TLC |> group_by(treatment) |> summarise(median(log(DAG)), mad(log(DAG))) 
+
+dag_priors <- prior(normal(8.9, 3), class = 'Intercept') + 
+  prior(normal(0, 5), class = 'b') + 
+  prior(student_t(3, 0, 1.1), class = 'sd') + 
+  prior(student_t(3, 0, 1.1), class = 'b', dpar = 'sigma')
+
+dag.brm1 <- brm(dag_form, 
+                 data = coral_TLC, 
+                 prior = dag_priors,
+                 sample_prior = 'only',
+                 iter = 10000, 
+                 warmup = 2500, 
+                 chains = 3, cores = 3, 
+                 thin = 15, 
+                 refresh = 0, 
+                 seed = 123, 
+                 control = list(adapt_delta = 0.99),
+                 backend = "cmdstan") 
+
+dag.brm1 |> conditional_effects("treatment") |> plot(points = TRUE)   
+#OK
+```
+
+####With data 
+```{r}
+#| label: 2_dag
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+dag.brm2 <- dag.brm1 |> update(sample_prior = "yes",
+                                       refresh = 0, 
+                                       iter = 10000,
+                                       warmup = 2500,
+                                       seed = 123) 
+
+dag.brm2 |> conditional_effects("treatment") |> plot(points = TRUE)
+
+save(dag.brm2, file = "../models/dag.brm2.RData")
+
+load("../models/dag.brm2.RData")
+
+```
+
+####MCMC sampling diagnostics
+```{r}
+#| label: 3_dag
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true 
+pars <- dag.brm2 |> get_variables()
+pars_2 <- str_extract(pars, '^b_.*|^shape*|^sd_.*|^sigma$') |> na.omit() 
+pars_3 <- str_extract(pars, '^b_sigma_.*$') |> na.omit() 
+
+#Traceplots
+dag.brm2$fit |> stan_trace(pars = pars_2, inc_warmup = TRUE)
+#Autocorrelation
+dag.brm2$fit |> stan_ac(pars = pars_2) 
+dag.brm2$fit |> stan_ac(pars = pars_3) 
+#Rhat
+dag.brm2$fit |> stan_rhat()
+#ESS
+dag.brm2$fit |> stan_ess() 
+#Summary
+summary(dag.brm2) 
+```
+
+####Posterior probablity checks
+```{r}
+#| label: 4_dag
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+dag.brm2 |> pp_check(type = 'dens_overlay', ndraws = 200) + theme_classic()
+```
+
+
+####DHARMA residuals
+```{r}
+#| label: 5_dag
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+coral.resids <- make_brms_dharma_res(dag.brm2, integerResponse = FALSE)
+
+wrap_elements(~testUniformity(coral.resids)) + 
+  wrap_elements(~plotResiduals(coral.resids, quantreg = FALSE)) +
+  wrap_elements(~testDispersion(coral.resids))
+#KS triggered but visually is OK
+```
+
+####Means
+```{r}
+#| label: 6_dag
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+load("../models/dag.brm2.RData")
+
+dag.means_mmg <- dag.brm2 |> 
+  emmeans(~treatment, type = 'response') |> 
+  as.data.frame() |> 
+  mutate(emmean = 10*emmean, 
+         lower.HPD = 10*lower.HPD, 
+         upper.HPD = 10*upper.HPD) 
+
+ggplot(data = dag.means_mmg, aes(x=factor(treatment, levels = level_order_new), y = emmean, colour = treatment)) + 
+  geom_point(data = coral_TLC, aes(x = factor(treatment, levels = level_order_new), y = 10*DAG), colour = "black", alpha = 0.5, size = 0.5, position = position_jitter(w = 0.1, h = 0))+
+  geom_pointrange(aes(ymin = lower.HPD, ymax = upper.HPD), fatten = 5) + 
+  theme_classic() +
+  theme(legend.position = "none", 
+        text = element_text(size=15, colour = "black"),
+        axis.text.y = element_text(colour = "black"), 
+        axis.text.x = element_text(colour = "black")) +
+  scale_x_discrete(labels = level_order_new, 
+                   expression(Treatment), 
+                   breaks = waiver()) + 
+  scale_y_continuous(expression(DAG~(mg~g^-1~lipid)), 
+                     #limits = c(0,100)
+                     )+ 
+    scale_colour_manual(values=group.colors)
+
+```
+
+####Pairwise comparisons
+```{r}
+#| label: 7_dag
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+sTreat <- dag.brm2$data |> pull(treatment) |> levels()
+STreat <- rep(1, length(sTreat))
+names(STreat) <- sTreat
+
+dag.brm2 |> emmeans(~treatment) |> 
+  gather_emmeans_draws() |>  
+  mutate(.value = (.value)) |> 
+  ungroup() |>
+  group_by(.draw) |> 
+  reframe(fit = data.frame(contrast = rownames(multcomp::contrMat(n = STreat, type = "Tukey")), 
+                           fit = t(as.vector(.value) %*% t(multcomp::contrMat(n = STreat, type = "Tukey"))))) |> 
+  unnest(fit) |> 
+  group_by(contrast) |> 
+  dplyr::summarise(median_hdci(fit),
+            Pl = mean(fit<0),
+            Pg = mean(fit>0)) 
+#absolute difference between the treatments
+```
+
+##FFA
+####Priors model
+```{r}
+#| label: 1_ffa
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+
+ffa_form <- bf(FFA ~ treatment + (1|tank_rep_rand:genotype), family = gaussian(link = "identity"))  
+
+coral_TLC |> group_by(treatment) |> summarise(median((FFA)), mad((FFA))) 
+
+ffa_priors <- prior(normal(3.5, 1.5), class = 'Intercept') + 
+  prior(normal(0, 4), class = 'b') + 
+  prior(student_t(3, 0, 1.2), class = 'sd') + 
+  prior(student_t(3, 0, 1.2), class = 'sigma')
+
+ffa.brm1 <- brm(ffa_form, 
+                 data = coral_TLC, 
+                 prior = ffa_priors,
+                 sample_prior = 'only',
+                 iter = 7000, 
+                 warmup = 2500, 
+                 chains = 3, cores = 3, 
+                 thin = 5, 
+                 refresh = 0, 
+                 seed = 123, 
+                 control = list(adapt_delta = 0.99),
+                 backend = "cmdstan") 
+
+ffa.brm1 |> conditional_effects("treatment") |> plot(points = TRUE)   
+#OK
+```
+
+####With data 
+```{r}
+#| label: 2_ffa
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+ffa.brm2 <- ffa.brm1 |> update(sample_prior = "yes",
+                                       refresh = 0, 
+                                       iter = 7000,
+                                       warmup = 2500,
+                                       seed = 123) 
+
+ffa.brm2 |> conditional_effects("treatment") |> plot(points = TRUE)
+
+save(ffa.brm2, file = "../models/ffa.brm2.RData")
+
+load("../models/ffa.brm2.RData")
+
+```
+
+####MCMC sampling diagnostics
+```{r}
+#| label: 3_ffa
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true 
+pars <- ffa.brm2 |> get_variables()
+pars_2 <- str_extract(pars, '^b_.*|^shape*|^sd_.*|^sigma$') |> na.omit() 
+
+#Traceplots
+ffa.brm2$fit |> stan_trace(pars = pars_2, inc_warmup = TRUE)
+#Autocorrelation
+ffa.brm2$fit |> stan_ac(pars = pars_2) 
+#Rhat
+ffa.brm2$fit |> stan_rhat()
+#ESS
+ffa.brm2$fit |> stan_ess() 
+#Summary
+summary(ffa.brm2) 
+```
+
+####Posterior probablity checks
+```{r}
+#| label: 4_ffa
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+ffa.brm2 |> pp_check(type = 'dens_overlay', ndraws = 200) + theme_classic()
+#Good
+```
+
+
+####DHARMA residuals
+```{r}
+#| label: 5_ffa
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+coral.resids <- make_brms_dharma_res(ffa.brm2, integerResponse = FALSE)
+
+wrap_elements(~testUniformity(coral.resids)) + 
+  wrap_elements(~plotResiduals(coral.resids, quantreg = FALSE)) +
+  wrap_elements(~testDispersion(coral.resids))
+#good
+```
+
+####Means
+```{r}
+#| label: 6_ffa
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+load("../models/ffa.brm2.RData")
+
+ffa.means_mmg <- ffa.brm2 |> 
+  emmeans(~treatment, type = 'response') |> 
+  as.data.frame() |> 
+  mutate(emmean = 10*emmean, 
+         lower.HPD = 10*lower.HPD, 
+         upper.HPD = 10*upper.HPD) 
+
+ggplot(data = ffa.means_mmg, aes(x=factor(treatment, levels = level_order_new), y = emmean, colour = treatment)) + 
+  geom_point(data = coral_TLC, aes(x = factor(treatment, levels = level_order_new), y = 10*FFA), colour = "black", alpha = 0.5, size = 0.5, position = position_jitter(w = 0.1, h = 0))+
+  geom_pointrange(aes(ymin = lower.HPD, ymax = upper.HPD), fatten = 5) + 
+  theme_classic() +
+  theme(legend.position = "none", 
+        text = element_text(size=15, colour = "black"),
+        axis.text.y = element_text(colour = "black"), 
+        axis.text.x = element_text(colour = "black")) +
+  scale_x_discrete(labels = level_order_new, 
+                   expression(Treatment), 
+                   breaks = waiver()) + 
+  scale_y_continuous(expression(FFA~(mg~g^-1~lipid)), 
+                     #limits = c(0,100)
+                     )+ 
+    scale_colour_manual(values=group.colors)
+
+```
+
+####Pairwise comparisons
+```{r}
+#| label: 7_ffa
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+sTreat <- ffa.brm2$data |> pull(treatment) |> levels()
+STreat <- rep(1, length(sTreat))
+names(STreat) <- sTreat
+
+ffa.brm2 |> emmeans(~treatment) |> 
+  gather_emmeans_draws() |>  
+  mutate(.value = (.value)) |> 
+  ungroup() |>
+  group_by(.draw) |> 
+  reframe(fit = data.frame(contrast = rownames(multcomp::contrMat(n = STreat, type = "Tukey")), 
+                           fit = t(as.vector(.value) %*% t(multcomp::contrMat(n = STreat, type = "Tukey"))))) |> 
+  unnest(fit) |> 
+  group_by(contrast) |> 
+  summarise(median_hdci(fit),
+            Pl = mean(fit<0),
+            Pg = mean(fit>0)) 
+#absolute difference between the treatments
+```
+
+##STEROL
+####Priors model
+```{r}
+#| label: 1_st
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+
+st_form <- bf(STEROL ~ treatment + (1|tank_rep_rand:genotype), family = gaussian(link = "identity"))  
+
+coral_TLC |> group_by(treatment) |> summarise(median((STEROL)), mad((STEROL))) 
+
+st_priors <- prior(normal(6.0, 2), class = 'Intercept') + 
+  prior(normal(0, 3.5), class = 'b') + 
+  prior(student_t(3, 0, 1), class = 'sd') + 
+  prior(student_t(3, 0, 1), class = 'sigma')
+
+st.brm1 <- brm(st_form, 
+                 data = coral_TLC, 
+                 prior = st_priors,
+                 sample_prior = 'only',
+                 iter = 10000, 
+                 warmup = 2500, 
+                 chains = 3, cores = 3, 
+                 thin = 10, 
+                 refresh = 0, 
+                 seed = 123, 
+                 control = list(adapt_delta = 0.99),
+                 backend = "cmdstan") 
+
+st.brm1 |> conditional_effects("treatment") |> plot(points = TRUE)   
+#OK
+```
+
+####With data 
+```{r}
+#| label: 2_st
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+st.brm2 <- st.brm1 |> update(sample_prior = "yes",
+                                       refresh = 0, 
+                                       iter = 10000,
+                                       warmup = 2500,
+                                       seed = 123) 
+
+st.brm2 |> conditional_effects("treatment") |> plot(points = TRUE)
+
+save(st.brm2, file = "../models/st.brm2.RData")
+
+load("../models/st.brm2.RData")
+
+```
+
+####MCMC sampling diagnostics
+```{r}
+#| label: 3_st
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true 
+pars <- st.brm2 |> get_variables()
+pars_2 <- str_extract(pars, '^b_.*|^shape*|^sd_.*|^sigma$') |> na.omit() 
+
+#Traceplots
+st.brm2$fit |> stan_trace(pars = pars_2, inc_warmup = TRUE)
+#Autocorrelation
+st.brm2$fit |> stan_ac(pars = pars_2) 
+#Rhat
+st.brm2$fit |> stan_rhat()
+#ESS
+st.brm2$fit |> stan_ess() 
+#Summary
+summary(st.brm2) 
+```
+
+####Posterior probablity checks
+```{r}
+#| label: 4_st
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+st.brm2 |> pp_check(type = 'dens_overlay', ndraws = 200) + theme_classic()
+#Good
+```
+
+
+####DHARMA residuals
+```{r}
+#| label: 5_st
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+coral.resids <- make_brms_dharma_res(st.brm2, integerResponse = FALSE)
+
+wrap_elements(~testUniformity(coral.resids)) + 
+  wrap_elements(~plotResiduals(coral.resids, quantreg = FALSE)) +
+  wrap_elements(~testDispersion(coral.resids))
+#good
+```
+
+####Means
+```{r}
+#| label: 6_st
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+load("../models/st.brm2.RData")
+
+st.means_mmg <- st.brm2 |> 
+  emmeans(~treatment, type = 'response') |> 
+  as.data.frame() |> 
+  mutate(emmean = 10*emmean, 
+         lower.HPD = 10*lower.HPD, 
+         upper.HPD = 10*upper.HPD) 
+
+ggplot(data = st.means_mmg, aes(x=factor(treatment, levels = level_order_new), y = emmean, colour = treatment)) + 
+  geom_point(data = coral_TLC, aes(x = factor(treatment, levels = level_order_new), y = 10*STEROL), colour = "black", alpha = 0.5, size = 0.5, position = position_jitter(w = 0.1, h = 0))+
+  geom_pointrange(aes(ymin = lower.HPD, ymax = upper.HPD), fatten = 5) + 
+  theme_classic() +
+  theme(legend.position = "none", 
+        text = element_text(size=15, colour = "black"),
+        axis.text.y = element_text(colour = "black"), 
+        axis.text.x = element_text(colour = "black")) +
+  scale_x_discrete(labels = level_order_new, 
+                   expression(Treatment), 
+                   breaks = waiver()) + 
+  scale_y_continuous(expression(STEROL~(mg~g^-1~lipid)), 
+                     #limits = c(0,100)
+                     )+ 
+    scale_colour_manual(values=group.colors)
+
+```
+
+####Pairwise comparisons
+```{r}
+#| label: 7_st
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+sTreat <- st.brm2$data |> pull(treatment) |> levels()
+STreat <- rep(1, length(sTreat))
+names(STreat) <- sTreat
+
+st.brm2 |> emmeans(~treatment) |> 
+  gather_emmeans_draws() |>  
+  mutate(.value = (.value)) |> 
+  ungroup() |>
+  group_by(.draw) |> 
+  reframe(fit = data.frame(contrast = rownames(multcomp::contrMat(n = STreat, type = "Tukey")), 
+                           fit = t(as.vector(.value) %*% t(multcomp::contrMat(n = STreat, type = "Tukey"))))) |> 
+  unnest(fit) |> 
+  group_by(contrast) |> 
+  summarise(median_hdci(fit),
+            Pl = mean(fit<0),
+            Pg = mean(fit>0)) 
+#absolute difference between the treatments
+```
+
+##AMPL
+####Priors model
+```{r}
+#| label: 1_ampl
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+
+ampl_form <- bf(AMPL ~ treatment + (1|tank_rep_rand), family = Gamma(link = "log"), shape ~ treatment*genotype)  
+
+
+coral_TLC |> group_by(treatment) |> summarise(median(log(AMPL)), mad(log(AMPL))) 
+
+ampl_priors <- prior(normal(3.1, 0.5), class = 'Intercept') + 
+  prior(normal(0, 1), class = 'b') + 
+  prior(student_t(3, 0, 0.3), class = 'sd') + 
+  prior(normal(0, 1), class = 'b', dpar = 'shape')
+
+ampl.brm1 <- brm(ampl_form, 
+                 data = coral_TLC, 
+                 prior = ampl_priors,
+                 sample_prior = 'only',
+                 iter = 5000, 
+                 warmup = 2500, 
+                 chains = 3, cores = 3, 
+                 thin = 5, 
+                 refresh = 0, 
+                 seed = 123, 
+                 control = list(adapt_delta = 0.99),
+                 backend = "cmdstan") 
+
+ampl.brm1 |> conditional_effects("treatment") |> plot(points = TRUE)   
+#OK
+```
+
+####With data 
+```{r}
+#| label: 2_ampl
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+ampl.brm2 <- ampl.brm1 |> update(sample_prior = "yes",
+                                       refresh = 0, 
+                                       iter = 5000,
+                                       warmup = 2500,
+                                       seed = 123) 
+
+ampl.brm2 |> conditional_effects("treatment") |> plot(points = TRUE)
+
+save(ampl.brm2, file = "../models/ampl.brm2.RData")
+
+load("../models/ampl.brm2.RData")
+
+```
+
+####MCMC sampling diagnostics
+```{r}
+#| label: 3_ampl
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true 
+pars <- ampl.brm2 |> get_variables()
+pars_2 <- str_extract(pars, '^b_.*|^shape*|^sd_.*|^sigma$') |> na.omit() 
+pars_3 <- str_extract(pars, '^sd_.*$') |> na.omit() 
+
+#Traceplots
+ampl.brm2$fit |> stan_trace(pars = pars_2, inc_warmup = TRUE)
+#Autocorrelation
+ampl.brm2$fit |> stan_ac(pars = pars_2) 
+ampl.brm2$fit |> stan_ac(pars = pars_3) 
+#Rhat
+ampl.brm2$fit |> stan_rhat()
+#ESS
+ampl.brm2$fit |> stan_ess() 
+#Summary
+summary(ampl.brm2) 
+```
+
+####Posterior probablity checks
+```{r}
+#| label: 4_ampl
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+ampl.brm2 |> pp_check(type = 'dens_overlay', ndraws = 200) + theme_classic()
+```
+
+
+####DHARMA residuals
+```{r}
+#| label: 5_ampl
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+coral.resids <- make_brms_dharma_res(ampl.brm2, integerResponse = FALSE)
+
+wrap_elements(~testUniformity(coral.resids)) + 
+  wrap_elements(~plotResiduals(coral.resids, quantreg = FALSE)) +
+  wrap_elements(~testDispersion(coral.resids))
+```
+
+####Means
+```{r}
+#| label: 6_ampl
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+load("../models/ampl.brm2.RData")
+
+ampl.means_mmg <- ampl.brm2 |> 
+  emmeans(~treatment, type = 'response') |> 
+  as.data.frame() |> 
+  mutate(response = 10*response, 
+         lower.HPD = 10*lower.HPD, 
+         upper.HPD = 10*upper.HPD) 
+
+ggplot(data = ampl.means_mmg, aes(x=factor(treatment, levels = level_order_new), y = response, colour = treatment)) + 
+  geom_point(data = coral_TLC, aes(x = factor(treatment, levels = level_order_new), y = 10*AMPL), colour = "black", alpha = 0.5, size = 0.5, position = position_jitter(w = 0.1, h = 0))+
+  geom_pointrange(aes(ymin = lower.HPD, ymax = upper.HPD), fatten = 5) + 
+  theme_classic() +
+  theme(legend.position = "none", 
+        text = element_text(size=15, colour = "black"),
+        axis.text.y = element_text(colour = "black"), 
+        axis.text.x = element_text(colour = "black")) +
+  scale_x_discrete(labels = level_order_new, 
+                   expression(Treatment), 
+                   breaks = waiver()) + 
+  scale_y_continuous(expression(AMPL~(mg~g^-1~lipid)))+ 
+    scale_colour_manual(values=group.colors)
+```
+
+####Pairwise comparisons
+```{r}
+#| label: 7_ampl
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+sTreat <- ampl.brm2$data |> pull(treatment) |> levels()
+STreat <- rep(1, length(sTreat))
+names(STreat) <- sTreat
+
+ampl.brm2 |> emmeans(~treatment) |> 
+  gather_emmeans_draws() |>  
+  dplyr::mutate(.value = exp(.value)) |> 
+  ungroup() |>
+  dplyr::group_by(.draw) |> 
+  reframe(fit = data.frame(contrast = rownames(multcomp::contrMat(n = STreat, type = "Tukey")), 
+                           fit = t(as.vector(.value) %*% t(multcomp::contrMat(n = STreat, type = "Tukey"))))) |> 
+  unnest(fit) |> 
+  dplyr::group_by(contrast) |> 
+  dplyr::summarise(median_hdci(fit),
+            Pl = mean(fit<0),
+            Pg = mean(fit>0)) 
+#absolute difference between the treatments
+```
+
+##PE
+####Priors model
+```{r}
+#| label: 1_pe
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+pe_form <- bf(PE ~ treatment + (1|tank_rep_rand:genotype), family = gaussian(link = "identity"), sigma ~ treatment)  
+
+
+coral_TLC |> group_by(treatment) |> summarise(median((PE)), mad((PE))) 
+
+pe_priors <- prior(normal(8.8, 3), class = 'Intercept') + 
+  prior(normal(0, 4), class = 'b') + 
+  prior(student_t(3, 0, 1), class = 'sd') + 
+  prior(normal(0, 1), class = 'b', dpar = 'sigma')
+
+pe.brm1 <- brm(pe_form, 
+                 data = coral_TLC, 
+                 prior = pe_priors,
+                 sample_prior = 'only',
+                 iter = 7000, 
+                 warmup = 2500, 
+                 chains = 3, cores = 3, 
+                 thin = 5, 
+                 refresh = 0, 
+                 seed = 123, 
+                 control = list(adapt_delta = 0.99),
+                 backend = "cmdstan") 
+
+pe.brm1 |> conditional_effects("treatment") |> plot(points = TRUE)   
+#OK
+```
+
+####With data 
+```{r}
+#| label: 2_pe
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+pe.brm2 <- pe.brm1 |> update(sample_prior = "yes",
+                                       refresh = 0, 
+                                       iter = 7000,
+                                       warmup = 2500,
+                                       seed = 123) 
+
+pe.brm2 |> conditional_effects("treatment") |> plot(points = TRUE)
+
+save(pe.brm2, file = "../models/pe.brm2.RData")
+
+load("../models/pe.brm2.RData")
+
+```
+
+####MCMC sampling diagnostics
+```{r}
+#| label: 3_pe
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true 
+pars <- pe.brm2 |> get_variables()
+pars_2 <- str_extract(pars, '^b_.*|^shape*|^sd_.*|^sigma$') |> na.omit() 
+pars_3 <- str_extract(pars, '^sd_.*$') |> na.omit() 
+
+#Traceplots
+pe.brm2$fit |> stan_trace(pars = pars_2, inc_warmup = TRUE)
+#Autocorrelation
+pe.brm2$fit |> stan_ac(pars = pars_2) 
+pe.brm2$fit |> stan_ac(pars = pars_3) 
+#Rhat
+pe.brm2$fit |> stan_rhat()
+#ESS
+pe.brm2$fit |> stan_ess() 
+#Summary
+summary(pe.brm2) 
+```
+
+####Posterior probablity checks
+```{r}
+#| label: 4_pe
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+pe.brm2 |> pp_check(type = 'dens_overlay', ndraws = 200) + theme_classic()
+```
+
+
+####DHARMA residuals
+```{r}
+#| label: 5_pe
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+coral.resids <- make_brms_dharma_res(pe.brm2, integerResponse = FALSE)
+
+wrap_elements(~testUniformity(coral.resids)) + 
+  wrap_elements(~plotResiduals(coral.resids, quantreg = FALSE)) +
+  wrap_elements(~testDispersion(coral.resids))
+```
+
+####Means
+```{r}
+#| label: 6_pe
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+load("../models/pe.brm2.RData")
+
+pe.means_mmg <- pe.brm2 |> 
+  emmeans(~treatment, type = 'response') |> 
+  as.data.frame() |> 
+  mutate(emmean = 10*emmean, 
+         lower.HPD = 10*lower.HPD, 
+         upper.HPD = 10*upper.HPD) 
+
+(pe.means_mmg)
+```
+
+####Pairwise comparisons
+```{r}
+#| label: 7_pe
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+sTreat <- pe.brm2$data |> pull(treatment) |> levels()
+STreat <- rep(1, length(sTreat))
+names(STreat) <- sTreat
+
+pe.brm2 |> emmeans(~treatment) |> 
+  gather_emmeans_draws() |>  
+  mutate(.value = (.value)) |> 
+  ungroup() |>
+  dplyr::group_by(.draw) |> 
+  reframe(fit = data.frame(contrast = rownames(multcomp::contrMat(n = STreat, type = "Tukey")), 
+                           fit = t(as.vector(.value) %*% t(multcomp::contrMat(n = STreat, type = "Tukey"))))) |> 
+  unnest(fit) |> 
+  dplyr::group_by(contrast) |> 
+  dplyr::summarise(median_hdci(fit),
+            Pl = mean(fit<0),
+            Pg = mean(fit>0)) 
+#absolute difference between the treatments
+```
+
+##PSPI
+####Priors model
+```{r}
+#| label: 1_pspi
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+pspi_form <- bf(PSPI ~ treatment + (1|tank_rep_rand:genotype), family = gaussian(link = "identity"), sigma ~ treatment)  
+
+coral_TLC |> group_by(treatment) |> summarise(median(log(PSPI)), mad(log(PSPI))) 
+
+pspi_priors <- prior(normal(13.0, 4), class = 'Intercept') + 
+  prior(normal(0, 9), class = 'b') + 
+  prior(student_t(3, 0, 1.5), class = 'sd') + 
+  prior(normal(0, 1.5), class = 'b', dpar = 'sigma')
+
+pspi.brm1 <- brm(pspi_form, 
+                 data = coral_TLC, 
+                 prior = pspi_priors,
+                 sample_prior = 'only',
+                 iter = 8000, 
+                 warmup = 2500, 
+                 chains = 3, cores = 3, 
+                 thin = 10, 
+                 refresh = 0, 
+                 seed = 123, 
+                 control = list(adapt_delta = 0.99),
+                 backend = "cmdstan") 
+
+pspi.brm1 |> conditional_effects("treatment") |> plot(points = TRUE)   
+#OK
+```
+
+####With data 
+```{r}
+#| label: 2_pspi
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+pspi.brm2 <- pspi.brm1 |> update(sample_prior = "yes",
+                                       refresh = 0, 
+                                       iter = 8000,
+                                       warmup = 2500,
+                                       seed = 123) 
+
+pspi.brm2 |> conditional_effects("treatment") |> plot(points = TRUE)
+
+save(pspi.brm2, file = "../models/pspi.brm2.RData")
+
+load("../models/pspi.brm2.RData")
+```
+
+####MCMC sampling diagnostics
+```{r}
+#| label: 3_pspi
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true 
+pars <- pspi.brm2 |> get_variables()
+pars_2 <- str_extract(pars, '^b_.*|^shape*|^sd_.*|^sigma$') |> na.omit() 
+pars_3 <- str_extract(pars, '^sd_.*$') |> na.omit() 
+
+#Traceplots
+pspi.brm2$fit |> stan_trace(pars = pars_2, inc_warmup = TRUE)
+#Autocorrelation
+pspi.brm2$fit |> stan_ac(pars = pars_2) 
+pspi.brm2$fit |> stan_ac(pars = pars_3) 
+#Rhat
+pspi.brm2$fit |> stan_rhat()
+#ESS
+pspi.brm2$fit |> stan_ess() 
+#Summary
+summary(pspi.brm2) 
+```
+
+####Posterior probablity checks
+```{r}
+#| label: 4_pspi
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+pspi.brm2 |> pp_check(type = 'dens_overlay', ndraws = 200) + theme_classic()
+```
+
+
+####DHARMA residuals
+```{r}
+#| label: 5_pspi
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+coral.resids <- make_brms_dharma_res(pspi.brm2, integerResponse = FALSE)
+
+wrap_elements(~testUniformity(coral.resids)) + 
+  wrap_elements(~plotResiduals(coral.resids, quantreg = FALSE)) +
+  wrap_elements(~testDispersion(coral.resids))
+```
+
+####Means
+```{r}
+#| label: 6_pspi
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+pspi.means_mmg <- pspi.brm2 |> 
+  emmeans(~treatment, type = 'response') |> 
+  as.data.frame() |> 
+  mutate(emmean = 10*emmean, 
+         lower.HPD = 10*lower.HPD, 
+         upper.HPD = 10*upper.HPD) 
+
+(pspi.means_mmg)
+```
+
+####Pairwise comparisons
+```{r}
+#| label: 7_pspi
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+sTreat <- pspi.brm2$data |> pull(treatment) |> levels()
+STreat <- rep(1, length(sTreat))
+names(STreat) <- sTreat
+
+pspi.brm2 |> emmeans(~treatment) |> 
+  gather_emmeans_draws() |>  
+  mutate(.value = (.value)) |> 
+  ungroup() |>
+  group_by(.draw) |> 
+  reframe(fit = data.frame(contrast = rownames(multcomp::contrMat(n = STreat, type = "Tukey")), 
+                           fit = t(as.vector(.value) %*% t(multcomp::contrMat(n = STreat, type = "Tukey"))))) |> 
+  unnest(fit) |> 
+  group_by(contrast) |> 
+  summarise(median_hdci(fit),
+            Pl = mean(fit<0),
+            Pg = mean(fit>0)) 
+#absolute difference between the treatments
+```
+
+
+##PC
+####Priors model
+```{r}
+#| label: 1_pc
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+pc_form <- bf(PC ~ treatment + (1|tank_rep_rand:genotype), family = gaussian(link = "identity"), sigma ~ treatment)  
+
+coral_TLC |> group_by(treatment) |> summarise(median((PC)), mad((PC))) 
+
+pc_priors <- prior(normal(11.3, 4), class = 'Intercept') + 
+  prior(normal(0, 6), class = 'b') + 
+  prior(student_t(3, 0, 1.5), class = 'sd') + 
+  prior(normal(0, 1.5), class = 'b', dpar = 'sigma')
+
+pc.brm1 <- brm(pc_form, 
+                 data = coral_TLC, 
+                 prior = pc_priors,
+                 sample_prior = 'only',
+                 iter = 8000, 
+                 warmup = 2500, 
+                 chains = 3, cores = 3, 
+                 thin = 10, 
+                 refresh = 0, 
+                 seed = 123, 
+                 control = list(adapt_delta = 0.99),
+                 backend = "cmdstan") 
+
+pc.brm1 |> conditional_effects("treatment") |> plot(points = TRUE)   
+#OK
+```
+
+####With data 
+```{r}
+#| label: 2_pc
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+pc.brm2 <- pc.brm1 |> update(sample_prior = "yes",
+                                       refresh = 0, 
+                                       iter = 8000,
+                                       warmup = 2500,
+                                       seed = 123) 
+
+pc.brm2 |> conditional_effects("treatment") |> plot(points = TRUE)
+
+save(pc.brm2, file = "../models/pc.brm2.RData")
+
+load("../models/pc.brm2.RData")
+```
+
+####MCMC sampling diagnostics
+```{r}
+#| label: 3_pc
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true 
+pars <- pc.brm2 |> get_variables()
+pars_2 <- str_extract(pars, '^b_.*|^shape*|^sd_.*|^sigma$') |> na.omit() 
+pars_3 <- str_extract(pars, '^sd_.*$') |> na.omit() 
+
+#Traceplots
+pc.brm2$fit |> stan_trace(pars = pars_2, inc_warmup = TRUE)
+#Autocorrelation
+pc.brm2$fit |> stan_ac(pars = pars_2) 
+pc.brm2$fit |> stan_ac(pars = pars_3) 
+#Rhat
+pc.brm2$fit |> stan_rhat()
+#ESS
+pc.brm2$fit |> stan_ess() 
+#Summary
+summary(pc.brm2) 
+```
+
+####Posterior probablity checks
+```{r}
+#| label: 4_pc
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+pc.brm2 |> pp_check(type = 'dens_overlay', ndraws = 200) + theme_classic()
+```
+
+
+####DHARMA residuals
+```{r}
+#| label: 5_pc
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+coral.resids <- make_brms_dharma_res(pc.brm2, integerResponse = FALSE)
+
+wrap_elements(~testUniformity(coral.resids)) + 
+  wrap_elements(~plotResiduals(coral.resids, quantreg = FALSE)) +
+  wrap_elements(~testDispersion(coral.resids))
+```
+
+####Means
+```{r}
+#| label: 6_pc
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+load("../models/pc.brm2.RData")
+
+pc.means_mmg <- pc.brm2 |> 
+  emmeans(~treatment, type = 'response') |> 
+  as.data.frame() |> 
+  mutate(emmean = 10*emmean, 
+         lower.HPD = 10*lower.HPD, 
+         upper.HPD = 10*upper.HPD) 
+
+(pc.means_mmg)
+```
+
+####Pairwise comparisons
+```{r}
+#| label: 7_pc
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+sTreat <- pc.brm2$data |> pull(treatment) |> levels()
+STreat <- rep(1, length(sTreat))
+names(STreat) <- sTreat
+
+pc.brm2 |> emmeans(~treatment) |> 
+  gather_emmeans_draws() |>  
+  mutate(.value = (.value)) |> 
+  ungroup() |>
+  group_by(.draw) |> 
+  reframe(fit = data.frame(contrast = rownames(multcomp::contrMat(n = STreat, type = "Tukey")), 
+                           fit = t(as.vector(.value) %*% t(multcomp::contrMat(n = STreat, type = "Tukey"))))) |> 
+  unnest(fit) |> 
+  group_by(contrast) |> 
+  dplyr::summarise(median_hdci(fit),
+            Pl = mean(fit<0),
+            Pg = mean(fit>0)) 
+#absolute difference between the treatments
+```
+
+
+##LPC
+####Priors model
+```{r}
+#| label: 1_lpc
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+lpc_form <- bf(LPC ~ treatment + (1|tank_rep_rand:genotype), family = gaussian(link = "identity"), sigma ~ treatment)  
+
+coral_TLC |> group_by(treatment) |> summarise(median((LPC)), mad((LPC))) 
+
+lpc_priors <- prior(normal(6.7, 3), class = 'Intercept') + 
+  prior(normal(0, 4), class = 'b') + 
+  prior(student_t(3, 0, 1), class = 'sd') + 
+  prior(normal(0, 1), class = 'b', dpar = 'sigma')
+
+lpc.brm1 <- brm(lpc_form, 
+                 data = coral_TLC, 
+                 prior = lpc_priors,
+                 sample_prior = 'only',
+                 iter = 8000, 
+                 warmup = 2500, 
+                 chains = 3, cores = 3, 
+                 thin = 10, 
+                 refresh = 0, 
+                 seed = 123, 
+                 control = list(adapt_delta = 0.99),
+                 backend = "cmdstan") 
+
+lpc.brm1 |> conditional_effects("treatment") |> plot(points = TRUE)   
+#OK
+```
+
+####With data 
+```{r}
+#| label: 2_lpc
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+lpc.brm2 <- lpc.brm1 |> update(sample_prior = "yes",
+                                       refresh = 0, 
+                                       iter = 8000,
+                                       warmup = 2500,
+                                       seed = 123) 
+
+lpc.brm2 |> conditional_effects("treatment") |> plot(points = TRUE)
+
+save(lpc.brm2, file = "../models/lpc.brm2.RData")
+
+load("../models/lpc.brm2.RData")
+
+```
+
+####MCMC sampling diagnostics
+```{r}
+#| label: 3_lpc
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true 
+pars <- lpc.brm2 |> get_variables()
+pars_2 <- str_extract(pars, '^b_.*|^shape*|^sd_.*|^sigma$') |> na.omit() 
+pars_3 <- str_extract(pars, '^sd_.*$') |> na.omit() 
+
+#Traceplots
+lpc.brm2$fit |> stan_trace(pars = pars_2, inc_warmup = TRUE)
+#Autocorrelation
+lpc.brm2$fit |> stan_ac(pars = pars_2) 
+lpc.brm2$fit |> stan_ac(pars = pars_3) 
+#Rhat
+lpc.brm2$fit |> stan_rhat()
+#ESS
+lpc.brm2$fit |> stan_ess() 
+#Summary
+summary(lpc.brm2) 
+```
+
+####Posterior probablity checks
+```{r}
+#| label: 4_lpc
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+lpc.brm2 |> pp_check(type = 'dens_overlay', ndraws = 200) + theme_classic()
+
+```
+
+
+####DHARMA residuals
+```{r}
+#| label: 5_lpc
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+coral.resids <- make_brms_dharma_res(lpc.brm2, integerResponse = FALSE)
+
+wrap_elements(~testUniformity(coral.resids)) + 
+  wrap_elements(~plotResiduals(coral.resids, quantreg = FALSE)) +
+  wrap_elements(~testDispersion(coral.resids))
+#OK
+```
+
+####Means
+```{r}
+#| label: 6_lpc
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+load("../models/lpc.brm2.RData")
+
+lpc.means <- lpc.brm2 |> 
+  emmeans(~treatment, type = 'response') |> 
+  as.data.frame()
+(lpc.means)  
+
+lpc.means_mmg <- lpc.brm2 |> 
+  emmeans(~treatment, type = 'response') |> 
+  as.data.frame() |> 
+  mutate(emmean = 10*emmean, 
+         lower.HPD = 10*lower.HPD, 
+         upper.HPD = 10*upper.HPD) 
+
+(lpc.means_mmg)
+```
+
+####Pairwise comparisons
+```{r}
+#| label: 7_lpc
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+sTreat <- lpc.brm2$data |> pull(treatment) |> levels()
+STreat <- rep(1, length(sTreat))
+names(STreat) <- sTreat
+
+lpc.brm2 |> emmeans(~treatment) |> 
+  gather_emmeans_draws() |>  
+  mutate(.value = (.value)) |> 
+  ungroup() |>
+  group_by(.draw) |> 
+  reframe(fit = data.frame(contrast = rownames(multcomp::contrMat(n = STreat, type = "Tukey")), 
+                           fit = t(as.vector(.value) %*% t(multcomp::contrMat(n = STreat, type = "Tukey"))))) |> 
+  unnest(fit) |> 
+  group_by(contrast) |> 
+  summarise(median_hdci(fit),
+            Pl = mean(fit<0),
+            Pg = mean(fit>0)) 
+#absolute difference between the treatments
+```
+
+##Storage
+
+####Priors model
+```{r}
+#| label: 1_store
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+store_form <- bf(Storage_new ~ treatment + (1|tank_rep_rand:genotype), family = gaussian(link = "identity"), sigma ~ treatment)  
+
+coral_TLC |> group_by(treatment) |> dplyr::summarise(median((Storage_new)), mad((Storage))) 
+
+store_priors <- prior(normal(30, 6), class = 'Intercept') + 
+  prior(normal(0, 20), class = 'b') + 
+  prior(student_t(3, 0, 6), class = 'sd') + 
+  prior(normal(0, 6), class = 'b', dpar = 'sigma')
+
+store.brm1 <- brm(store_form, 
+                 data = coral_TLC, 
+                 prior = store_priors,
+                 sample_prior = 'only',
+                 iter = 9000, 
+                 warmup = 2500, 
+                 chains = 3, cores = 3, 
+                 thin = 10, 
+                 refresh = 0, 
+                 seed = 123, 
+                 control = list(adapt_delta = 0.99),
+                 backend = "cmdstan") 
+
+store.brm1 |> conditional_effects("treatment") |> plot(points = TRUE)   
+#OK
+```
+
+####With data 
+```{r}
+#| label: 2_store
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+store.brm2 <- store.brm1 |> update(sample_prior = "yes",
+                                       refresh = 0, 
+                                       iter = 9000,
+                                       warmup = 2500,
+                                       seed = 123) 
+
+store.brm2 |> conditional_effects("treatment") |> plot(points = TRUE)
+
+save(store.brm2, file = "../models/store.brm2.RData")
+
+load("../models/store.brm2.RData")
+
+```
+
+####MCMC sampling diagnostics
+```{r}
+#| label: 3_store
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true 
+pars <- store.brm2 |> get_variables()
+pars_2 <- str_extract(pars, '^b_.*|^shape*|^sd_.*|^sigma$') |> na.omit() 
+pars_3 <- str_extract(pars, '^sd_.*$') |> na.omit() 
+
+#Traceplots
+store.brm2$fit |> stan_trace(pars = pars_2, inc_warmup = TRUE)
+#Autocorrelation
+store.brm2$fit |> stan_ac(pars = pars_2) 
+store.brm2$fit |> stan_ac(pars = pars_3) 
+#Rhat
+store.brm2$fit |> stan_rhat()
+#ESS
+store.brm2$fit |> stan_ess() 
+#Summary
+summary(store.brm2) 
+```
+
+####Posterior probablity checks
+```{r}
+#| label: 4_store
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+store.brm2 |> pp_check(type = 'dens_overlay', ndraws = 200) + theme_classic()
+
+```
+
+
+####DHARMA residuals
+```{r}
+#| label: 5_store
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+coral.resids <- make_brms_dharma_res(store.brm2, integerResponse = FALSE)
+
+wrap_elements(~testUniformity(coral.resids)) + 
+  wrap_elements(~plotResiduals(coral.resids, quantreg = FALSE)) +
+  wrap_elements(~testDispersion(coral.resids))
+#OK
+```
+
+####Means
+```{r}
+#| label: 6_store
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+load("../models/store.brm2.RData")
+
+store.means_mmg <- store.brm2 |> 
+  emmeans(~treatment, type = 'response') |> 
+  as.data.frame() |> 
+  mutate(emmean = 10*emmean, 
+         lower.HPD = 10*lower.HPD, 
+         upper.HPD = 10*upper.HPD) 
+
+(store.means_mmg)
+```
+
+####Pairwise comparisons
+```{r}
+#| label: 7_store
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+sTreat <- store.brm2$data |> pull(treatment) |> levels()
+STreat <- rep(1, length(sTreat))
+names(STreat) <- sTreat
+
+store.brm2 |> emmeans(~treatment) |> 
+  gather_emmeans_draws() |>  
+  mutate(.value = (.value)) |> 
+  ungroup() |>
+  group_by(.draw) |> 
+  reframe(fit = data.frame(contrast = rownames(multcomp::contrMat(n = STreat, type = "Tukey")), 
+                           fit = t(as.vector(.value) %*% t(multcomp::contrMat(n = STreat, type = "Tukey"))))) |> 
+  unnest(fit) |>  
+  group_by(contrast) |> 
+  dplyr::summarise(median_hdci(fit),
+            Pl = mean(fit<0),
+            Pg = mean(fit>0)) 
+
+#absolute difference between the treatments
+```
+
+##Structural
+####Priors model
+```{r}
+#| label: 1_struct
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+struct_form <- bf(Structural_new ~ treatment + (1|tank_rep_rand:genotype), family = gaussian(link = "identity"), sigma ~ treatment)  
+
+coral_TLC |> group_by(treatment) |> dplyr::summarise(median((Structural_new)), mad((Structural_new))) 
+
+struct_priors <- prior(normal(70, 6), class = 'Intercept') + 
+  prior(normal(0, 20), class = 'b') + 
+  prior(student_t(3, 0, 6), class = 'sd') + 
+  prior(normal(0, 6), class = 'b', dpar = 'sigma')
+
+struct.brm1 <- brm(struct_form, 
+                 data = coral_TLC, 
+                 prior = struct_priors,
+                 sample_prior = 'only',
+                 iter = 9000, 
+                 warmup = 2500, 
+                 chains = 3, cores = 3, 
+                 thin = 10, 
+                 refresh = 0, 
+                 seed = 123, 
+                 control = list(adapt_delta = 0.99),
+                 backend = "cmdstan") 
+
+struct.brm1 |> conditional_effects("treatment") |> plot(points = TRUE)   
+#OK
+```
+
+####With data 
+```{r}
+#| label: 2_struct
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+struct.brm2 <- struct.brm1 |> update(sample_prior = "yes",
+                                       refresh = 0, 
+                                       iter = 9000,
+                                       warmup = 2500,
+                                       seed = 123) 
+
+struct.brm2 |> conditional_effects("treatment") |> plot(points = TRUE)
+
+save(struct.brm2, file = "../models/struct.brm2.RData")
+
+load("../models/struct.brm2.RData")
+
+```
+
+####MCMC sampling diagnostics
+```{r}
+#| label: 3_struct
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true 
+pars <- struct.brm2 |> get_variables()
+pars_2 <- str_extract(pars, '^b_.*|^shape*|^sd_.*|^sigma$') |> na.omit() 
+pars_3 <- str_extract(pars, '^sd_.*$') |> na.omit() 
+
+#Traceplots
+struct.brm2$fit |> stan_trace(pars = pars_2, inc_warmup = TRUE)
+#Autocorrelation
+struct.brm2$fit |> stan_ac(pars = pars_2) 
+struct.brm2$fit |> stan_ac(pars = pars_3) 
+#Rhat
+struct.brm2$fit |> stan_rhat()
+#ESS
+struct.brm2$fit |> stan_ess() 
+#Summary
+summary(struct.brm2) 
+```
+
+####Posterior probablity checks
+```{r}
+#| label: 4_struct
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+struct.brm2 |> pp_check(type = 'dens_overlay', ndraws = 200) + theme_classic()
+
+```
+
+
+####DHARMA residuals
+```{r}
+#| label: 5_struct
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+coral.resids <- make_brms_dharma_res(struct.brm2, integerResponse = FALSE)
+
+wrap_elements(~testUniformity(coral.resids)) + 
+  wrap_elements(~plotResiduals(coral.resids, quantreg = FALSE)) +
+  wrap_elements(~testDispersion(coral.resids))
+#OK
+```
+
+####Means
+```{r}
+#| label: 6_struct
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+load("../models/struct.brm2.RData")
+
+struct.means_mmg <- struct.brm2 |> 
+  emmeans(~treatment, type = 'response') |> 
+  as.data.frame() |> 
+  mutate(emmean = 10*emmean, 
+         lower.HPD = 10*lower.HPD, 
+         upper.HPD = 10*upper.HPD) 
+
+(struct.means_mmg)
+```
+
+####Pairwise comparisons
+```{r}
+#| label: 7_struct
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+load("../models/struct.brm2.RData")
+
+sTreat <- struct.brm2$data |> pull(treatment) |> levels()
+STreat <- rep(1, length(sTreat))
+names(STreat) <- sTreat
+
+struct.brm2 |> emmeans(~treatment) |> 
+  gather_emmeans_draws() |>  
+  mutate(.value = (.value)) |> 
+  ungroup() |>
+  group_by(.draw) |> 
+  reframe(fit = data.frame(contrast = rownames(multcomp::contrMat(n = STreat, type = "Tukey")), 
+                           fit = t(as.vector(.value) %*% t(multcomp::contrMat(n = STreat, type = "Tukey"))))) |> 
+  unnest(fit) |> 
+  group_by(contrast) |> 
+  dplyr::summarise(median_hdci(fit),
+            Pl = mean(fit<0),
+            Pg = mean(fit>0)) 
+#absolute difference between the treatments
+```
+
+##TL TAG
+####Priors model
+```{r}
+#| label: 1_tagtl
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+tltag_form <- bf(TL_TAG ~ treatment + (1|tank_rep_rand:genotype), family = Gamma(link = "log")) 
+
+coral_TLC |> group_by(treatment) |> summarise(median(log(TL_TAG)), mad(log(TL_TAG))) 
+
+tltag_priors <- prior(normal(1.6, 0.9), class = 'Intercept') + 
+  prior(normal(0, 1.3), class = 'b') + 
+  prior(student_t(3, 0, 0.5), class = 'sd') + 
+  prior(gamma(0.01, 0.01), class = 'shape')
+
+tltag.brm1 <- brm(tltag_form, 
+                 data = coral_TLC,
+                 prior = tltag_priors, 
+                 sample_prior = 'only',
+                 iter = 5000, 
+                 warmup = 2500, 
+                 chains = 3, cores = 3, 
+                 thin = 10, 
+                 refresh = 0, 
+                 seed = 123, 
+                 control = list(adapt_delta = 0.99),
+                 backend = "cmdstan") 
+
+tltag.brm1 |> conditional_effects("treatment") |> plot(points = TRUE)   
+#OK
+```
+
+####With data 
+```{r}
+#| label: 2_tagtl
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+
+tltag.brm2 <- tltag.brm1 |> update(sample_prior = "yes",
+                                       refresh = 0, 
+                                       iter = 7500,
+                                       warmup = 2500,
+                                       seed = 123) 
+
+tltag.brm2 |> conditional_effects("treatment") |> plot(points = TRUE)
+
+save(tltag.brm2, file = "../models/tltag.brm2.RData")
+
+load("../models/tltag.brm2.RData")
+
+```
+
+####MCMC sampling diagnostics
+```{r}
+#| label: 3_tagtl
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true 
+pars <- tltag.brm2 |> get_variables()
+pars_2 <- str_extract(pars, '^b_.*|^shape*|^sd_.*|^sigma$') |> na.omit() 
+
+#Traceplots
+tltag.brm2$fit |> stan_trace(pars = pars_2, inc_warmup = TRUE)
+#Autocorrelation
+tltag.brm2$fit |> stan_ac(pars = pars_2) 
+#Rhat
+tltag.brm2$fit |> stan_rhat()
+#ESS
+tltag.brm2$fit |> stan_ess() 
+#Summary
+summary(tltag.brm2) 
+```
+
+####Posterior probablity checks
+```{r}
+#| label: 4_tagtl
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+tltag.brm2 |> pp_check(type = 'dens_overlay', ndraws = 200) + theme_classic()
+#OK
+```
+
+
+####DHARMA residuals
+```{r}
+#| label: 5_tagtl
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+coral.resids <- make_brms_dharma_res(tltag.brm2, integerResponse = FALSE)
+
+wrap_elements(~testUniformity(coral.resids)) + 
+  wrap_elements(~plotResiduals(coral.resids, form = factor(rep(1, nrow(coral_TLC))))) +
+  wrap_elements(~plotResiduals(coral.resids, quantreg = FALSE)) +
+  wrap_elements(~testDispersion(coral.resids)) 
+#OK
+```
+
+####Means
+```{r}
+#| label: 6_tagtl
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+load("../models/tltag.brm2.RData")
+
+tltag.means <- tltag.brm2 |> 
+  emmeans(~treatment, type = 'response') |> 
+  as.data.frame()
+
+(tltag.means)  
+
+ggplot(data = tltag.means, aes(x=factor(treatment, levels = level_order_new), y = response, colour = treatment)) + 
+  geom_point(data = coral_TLC, aes(x = factor(treatment, levels = level_order_new), y = TL_TAG), colour = "black", alpha = 0.5, size = 0.5, position = position_jitter(w = 0.1, h = 0))+
+  geom_pointrange(aes(ymin = lower.HPD, ymax = upper.HPD), fatten = 5) + 
+  theme_classic() +
+  theme(legend.position = "none", 
+        text = element_text(size=15, colour = "black"),
+        axis.text.y = element_text(colour = "black"), 
+        axis.text.x = element_text(colour = "black")) +
+  scale_x_discrete(labels = level_order_new, 
+                   expression(Treatment), 
+                   breaks = waiver()) + 
+  scale_y_continuous(expression(TAG~(mg~g^-1~AFDW)), 
+                     #limits = c(0,100)
+                     )+ 
+    scale_colour_manual(values=group.colors)
+
+```
+
+####Pairwise comparisons
+```{r}
+#| label: 7_tagtl
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+sTreat <- tltag.brm2$data |> pull(treatment) |> levels()
+STreat <- rep(1, length(sTreat))
+names(STreat) <- sTreat
+
+(tltag.means)  
+
+tltag.brm2 |> emmeans(~treatment) |> 
+  gather_emmeans_draws() |>  
+  dplyr::mutate(.value = exp(.value)) |> 
+  ungroup() |>
+  dplyr::group_by(.draw) |> 
+  reframe(fit = data.frame(contrast = rownames(multcomp::contrMat(n = STreat, type = "Tukey")), 
+                           fit = t(as.vector(.value) %*% t(multcomp::contrMat(n = STreat, type = "Tukey"))))) |> 
+  unnest(fit) |> 
+  dplyr::group_by(contrast) |> 
+  dplyr::summarise(median_hdci(fit),
+            Pl = mean(fit<0),
+            Pg = mean(fit>0)) 
+#absolute difference between the treatments
+```

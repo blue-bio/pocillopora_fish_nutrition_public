@@ -1,0 +1,1092 @@
+---
+title: "fcn_microbes"
+format: html
+editor: source
+---
+
+# Preparations
+
+##Load packages
+```{r Preperations}
+#| label: libraries
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: false
+
+library(ape) # Analyses of Phylogenetics and Evolution package. Required for tree calculations to be used with phyloseq
+#library(DESeq2) # This package will help analyze "differential expression" in the microbiota alongside phyloseq
+library(ggplot2) # Graphing package used in phyloseq. To edit the default setting of a plot, you need to use functions in this package.
+library(phyloseq) # The phyloseq package seeks to address issues with multiple microbiome analysis packages by providing a set of functions that internally manage the organizing, linking, storing, and analyzing of phylogenetic sequencing data. In general, this package is used for UniFrac analyses.
+library(plotly) # A package to create interactive web graphics of use in 3D plots
+library(vegan) # The vegan package provides tools for descriptive community ecology. It has most basic functions of diversity analysis, community ordination and dissimilarity analysis. In general, this package is used for Bray-Curtis and Jaccard analyses.
+library(tidyverse) # This package is designed to make it easy to install and load multiple 'tidyverse' packages in a single step
+library(adespatial) # Tools for the multiscale spatial analysis of multivariate data
+library(devtools) # Make package development easier by providing R functions that simplify and expedite common tasks
+library(qiime2R) # A package for importing qiime artifacts into an R session
+library(microbiome) # Data analysis and visualization
+library("pander") # provide a minimal and easy tool for rendering R objects into Pandoc's markdown
+library(grid) # support data visualization
+library(gridExtra)  # support data visualization
+library(knitr) # Provides a general-purpose tool for dynamic report generation in R using Literate Programming techniques.
+library(png) # Figure download
+library("ggdendro") #set of tools for dendrograms and tree plots using 'ggplot2'
+library(ggpubr) # publication quality figures, based on ggplot2
+library(RColorBrewer) # nice color options
+library(devtools)
+library(knitr)
+library(ape)
+library(eulerr)
+library(OTUtable)
+library(dunn.test)
+library(glmmTMB)
+library(emmeans) 
+library(RVAideMemoire) 
+library(datawizard) 
+library(indicspecies)
+library(labdsv)
+library(DHARMa)
+library(powerjoin)
+library(plyr)
+library(reshape2)
+library(patchwork)
+library(factoextra)
+library(base)
+library(geomtextpath)
+library(ggnewscale)
+library(ggrepel)
+library(ggvegan)
+
+source('../multivar_helperFunctions.R') 
+source('../geom_textsegment.R')
+
+set.seed(42)
+```
+
+##Colours + plot orders
+```{r}
+group.colors <- c(Control = "#999999", Dissolved = "#E69F00", Fish = "#56B4E9", LiveFeeds = "#009E73", Mix = "#F0E442", Pellets = "#0072B2", Field = "#D55E00", SeaSim = "#CC79A7" ) 
+
+level_order_microbe_new <- c('Field', 'SeaSim', 'Control','Pellets', 'LiveFeeds', 'Mix', 'Fish', 'Dissolved')
+level_names_microbe_new <- c('Field', 'Post - acclimation', 'Control','Pellets', 'LiveFeeds', 'LiveFeeds + Fish', 'Fish', 'Dissolved') 
+```
+
+#Phyloseq 
+##Silva 341-805 trained, f255r240 CORRECT
+###qza
+```{r}
+
+phy_2_c <- qza_to_phyloseq("../data/microbes/denoised_table_f255r240.qza", 
+                         "../data/microbes/rooted_tree_f255r240.qza",
+                         "../data/microbes/taxonomy_majority_341-805-trained_f255r240.qza",
+                         "../data/microbes/metadata_full.tsv")
+```
+
+
+##Filtering
+###Remove Eukaryote, Mitochondria and Chloroplasts 
+```{r} 
+phy_filtered_c <- phy_2_c |>  subset_taxa(Kingdom != "d__Eukaryota")
+phy_filtered_c <- phy_filtered_c |>  subset_taxa(Family  != "f__Mitochondria")
+phy_filtered_c <- phy_filtered_c |>  subset_taxa(Family  != "Mitochondria")
+phy_filtered_c <- phy_filtered_c |>  subset_taxa(Order != "Chloroplast")
+phy_filtered_c <- phy_filtered_c |>  subset_taxa(Order != "o__Chloroplast")
+phy_filtered_c <- phy_filtered_c |>  subset_taxa(Kingdom != "d__Chloroplast")
+
+```
+
+###Reads > 1,000
+```{r}
+c_phy_filtered_r1000 <- prune_samples(sample_sums(phy_filtered_c) > 1000, phy_filtered_c)
+```
+
+###Relative abundace 
+```{r}
+#keeping only ASvs with mean > 0.00001 (0.001%)
+#relative abundance
+c_phy_filtered_r1000_rel  <- transform_sample_counts(c_phy_filtered_r1000, function(x) x / sum(x) )
+c_phy_filtered_r1000_rele5 <- phyloseq::filter_taxa(c_phy_filtered_r1000_rel, function(x) mean(x) > 1e-5,TRUE)
+c_phy_filtered_r1000_rele5 = prune_taxa(taxa_sums(c_phy_filtered_r1000_rele5) > 0, c_phy_filtered_r1000_rele5) #remove  
+
+#absolute abundance (removing ones with rel ab < 0.00001)
+c_phy_filtered_r1000_rel_F <- phyloseq::filter_taxa(c_phy_filtered_r1000_rel, function(x) mean(x) < 1e-5 ,TRUE)
+rmtaxa = taxa_names(c_phy_filtered_r1000_rel_F)
+alltaxa = taxa_names(c_phy_filtered_r1000)
+
+myTaxa = alltaxa[!alltaxa %in% rmtaxa]
+
+c_phy_filtered_r1000_abse5 <- prune_taxa(myTaxa, c_phy_filtered_r1000)
+c_phy_filtered_r1000_abse5 = prune_taxa(taxa_sums(c_phy_filtered_r1000_abse5) > 0, c_phy_filtered_r1000_abse5) #remove  
+``` 
+
+#Diversity 
+
+##Rarefy even depth 
+###Apply
+```{r}
+#min = 1026
+phy_filtered_r1000_rarefy <-  rarefy_even_depth(physeq = c_phy_filtered_r1000,
+                  sample.size = min(sample_sums(c_phy_filtered_r1000)),
+                  rngseed = 42, 
+                  replace=TRUE )
+
+phy_filtered_r1000_abse5_rarefy <-  rarefy_even_depth(physeq = c_phy_filtered_r1000_abse5,
+                  sample.size = min(sample_sums(c_phy_filtered_r1000_abse5)),
+                  rngseed = 42, 
+                  replace=TRUE )
+```
+
+##Alpha 
+###microbiome::alpha
+```{r}
+phy_filtered_r1000_rarefy_alpha <-microbiome::alpha(phy_filtered_r1000_rarefy, index = "all")
+phy_filtered_r1000_rarefy_data <- sample_data(phy_filtered_r1000_rarefy)
+
+alpha_r1000_rarefy <- base::merge(phy_filtered_r1000_rarefy_data, phy_filtered_r1000_rarefy_alpha, by = 0)
+
+##calculate evenness 
+alpha_r1000_rarefy <- alpha_r1000_rarefy |>  
+  mutate(Evenness = diversity_shannon/log(observed))
+#Shannon's evenness 
+
+alpha_r1000_rarefy |> dplyr::filter(type == "coral", 
+                                    treatment == c("Mix", "Field")) |>  
+  dplyr::select(Row.names, treatment, observed, diversity_shannon, Evenness)
+```
+
+####Observed ASV (richness) 
+```{r}
+obs_asv_rare <- microbiome::alpha(phy_filtered_r1000_rarefy, index = 'observed')
+obs_data <- sample_data(c_phy_filtered_r1000) |> as.data.frame()
+obs_total_rare <- base::merge(obs_data, obs_asv_rare, by = 0)
+
+ obs_total_rare |> 
+  group_by(type, treatment) |> 
+  dplyr::summarize(mean = mean(observed), 
+                   count = n(), 
+                   SD = sd(observed)) |> 
+  mutate(se = SD/sqrt(count)) 
+```
+
+###Boxplots 
+####Obs ASV (rarefy)
+```{r}
+obs_total_rare_coral <- obs_total_rare |> filter(type == "coral")
+
+obs_boxplot <- ggplot(data = obs_total_rare_coral, 
+       aes(x = factor(treatment, levels = level_order_microbe_new), y = observed, 
+           colour = treatment))  + 
+  geom_boxplot(fill = "white", alpha = 1, outlier.shape = NA, width = 0.5) +
+  geom_jitter(size=1, alpha=0.9) +
+  scale_colour_manual(values = group.colors) +
+  theme_classic() +
+  theme(plot.background = element_blank(),
+        panel.grid.major = element_line(colour = "grey"),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        axis.line = element_line(colour = "black"), 
+        legend.position="none", 
+        axis.text.x = element_text(size = 14, colour = "black", angle = 45, vjust = 1, hjust = 1), 
+        axis.text.y = element_text(size = 14, colour = "black"), 
+        axis.title.y = element_text(size = 16, colour = "black"), 
+        legend.text = element_text(size = 9, colour = "black")) +  
+   scale_x_discrete("", 
+                    labels = stringr::str_wrap(level_names_microbe_new, 9),
+                    expression("")) + 
+  scale_y_continuous(name = "Observed ASVs", 
+                     limits = c(0, 350))
+  
+```
+
+####Shannon Evenness
+```{r}
+coral_alpha_r1000_rarefy <- alpha_r1000_rarefy |> filter(type == "coral")
+
+shannon_even_boxplot <- ggplot(data = coral_alpha_r1000_rarefy, 
+       aes(x = factor(treatment, levels = level_order_microbe_new), y = Evenness, 
+           colour = treatment))  + 
+  geom_boxplot(fill = "white", alpha = 0.9, outlier.shape = NA, width = 0.5) +
+  geom_jitter(size=1, alpha = 0.5, width = 0.2, height = 0) +
+  scale_colour_manual(values = group.colors) +
+  theme_classic() +
+  theme(plot.background = element_blank(),
+        panel.grid.major = element_line(colour = "grey"),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        axis.line = element_line(colour = "black"), 
+        legend.position="none", 
+        axis.text.x = element_text(size = 14, colour = "black", angle = 45, vjust = 1, hjust = 1), 
+        axis.text.y = element_text(size = 14, colour = "black"), 
+        axis.title.y = element_text(size = 16, colour = "black"), 
+        legend.text = element_text(size = 9, colour = "black")) +  
+   scale_x_discrete("", 
+                    labels = stringr::str_wrap(level_names_microbe_new, 9),
+                    expression("")) + 
+  scale_y_continuous(name = "Shannon Index", 
+                     limits = c(0.5, 1), 
+                     breaks = seq(0.5, 1, by = 0.1))
+```
+
+#####Merge plots 
+```{r}
+obs_boxplot + shannon_even_boxplot + plot_annotation(tag_levels = "a", tag_suffix = ")") 
+
+ggarrange(obs_boxplot, shannon_even_boxplot,
+                    labels = c("a)", "b)"),
+                    ncol = 2, nrow = 1,
+          font.label = list(size = 14, color = "black", face = "plain", family = NULL))
+```
+
+###Kruskal Wallis, glmmTMB
+####Corals
+```{r}
+alpha_r1000_rarefy_corals <- alpha_r1000_rarefy |> dplyr::filter(type == "coral") |> droplevels()
+
+#ASV (observed)
+kruskal.test(observed ~ treatment, data = alpha_r1000_rarefy_corals)
+#Kruskal-Wallis chi-squared = 28.636, df = 7, p-value = 0.0001686
+
+obs_glm <- glmmTMB(log(observed) ~ treatment + (1|tank), data = alpha_r1000_rarefy_corals, family = 'gaussian', REML = TRUE)
+summary(obs_glm)
+simulateResiduals(fittedModel = obs_glm, plot = T) #no problems detected
+
+obs_glm |> 
+  emmeans(~treatment, type = "response") |> 
+  pairs() |>  
+  rbind(adjust='bh')
+
+#Shannon Eveness index 
+kruskal.test(Evenness ~ treatment, data = alpha_r1000_rarefy_corals)
+#Kruskal-Wallis chi-squared = 20.706, df = 7, p-value = 0.00423
+
+shannon_glm <- glmmTMB(Evenness ~ treatment + (1|tank), data = alpha_r1000_rarefy_corals, family = 'gaussian', REML = TRUE)
+summary(shannon_glm)
+simulateResiduals(fittedModel = shannon_glm, plot = T) #no problems detected
+
+shannon_glm |> 
+  emmeans (~treatment, type = "response") |> 
+  pairs() |>  
+  rbind(adjust='bh')
+```
+
+####Water filters
+```{r}
+alpha_103r_wf <- alpha_r1000_rarefy |> dplyr::filter(type == "water_filter") |> droplevels()
+
+#ASV (observed)
+kruskal.test(observed ~ treatment, data = alpha_103r_wf)
+##No differences in absolute ASV abundance 
+
+#Shannon Evenness index 
+kruskal.test(Evenness ~ treatment, data = alpha_103r_wf)
+##No differences in index
+
+```
+
+##Beta 
+###Sqrt ASV
+```{r}
+sample_sums(c_phy_filtered_r1000_rele5)
+
+phy_filtered_r1000_rele5_sqrt <- transform_sample_counts(c_phy_filtered_r1000_rele5, function (x) sqrt(x))
+phy_filtered_r1000_rele5_sqrt = prune_taxa(taxa_sums(phy_filtered_r1000_rele5_sqrt) > 0, phy_filtered_r1000_rele5_sqrt) #remove unobserved ASVs (sum 0 across all samples)
+
+#only corals
+phy_bac_10e3_r_105_sqrt_corals <- subset_samples(phy_filtered_r1000_rele5_sqrt, type == "coral")
+phy_bac_10e3_r_105_sqrt_corals = prune_taxa(taxa_sums(phy_bac_10e3_r_105_sqrt_corals) > 0, phy_bac_10e3_r_105_sqrt_corals) #remove unobserved ASVs (sum 0 across all samples)
+
+#only water 
+phy_bac_10e3_r_105_sqrt_wf <- subset_samples(phy_filtered_r1000_rele5_sqrt, type == "water_filter")
+phy_bac_10e3_r_105_sqrt_wf = prune_taxa(taxa_sums(phy_bac_10e3_r_105_sqrt_wf) > 0, phy_bac_10e3_r_105_sqrt_wf) #remove unobserved ASVs (sum 0 across all samples)
+
+#water and corals 
+phy_bac_10e3_r_105_sqrt_cwf <- subset_samples(phy_filtered_r1000_rele5_sqrt, type != "diet")
+phy_bac_10e3_r_105_sqrt_cwf = prune_taxa(taxa_sums(phy_bac_10e3_r_105_sqrt_cwf) > 0, phy_bac_10e3_r_105_sqrt_cwf) #remove unobserved ASVs (sum 0 across all samples)
+```
+
+###PERMANOVA 
+####Corals only
+```{r}
+#do distances (bray-curist dissimilairty) vary between groups
+phy_filtered_r1000_rele5_sqrt_coral <- subset_samples(phy_filtered_r1000_rele5_sqrt, type == "coral")
+phy_filtered_r1000_rele5_sqrt_coral = prune_taxa(taxa_sums(phy_filtered_r1000_rele5_sqrt_coral) > 0, phy_filtered_r1000_rele5_sqrt_coral) #remove unobserved ASVs (sum 0 across all samples)
+
+coral_adonis_data = as (sample_data(phy_filtered_r1000_rele5_sqrt_coral), "data.frame")
+coral_bray_data = phyloseq::distance(phy_filtered_r1000_rele5_sqrt_coral,'bray') 
+
+coral_adonis <- adonis2(coral_bray_data ~ treatment, data=coral_adonis_data,  permutations = 10000, method = "bray") 
+coral_adonis
+#           Df SumOfSqs      R2      F    Pr(>F)    
+# treatment  7   8.2649 0.37581 4.3865 9.999e-05 ***
+# Residual  51  13.7276 0.62419                     
+# Total     58  21.9925 1.00000                        
+
+## dispersion ##
+#treatment
+beta <- betadisper(coral_bray_data, sample_data(phy_filtered_r1000_rele5_sqrt_coral)$treatment)
+disper.test = permutest(beta, permutations =10000)
+disper.test 
+#           Df  Sum Sq  Mean Sq      F N.Perm    Pr(>F)    
+# Groups     7 1.70178 0.243111 24.251  10000 9.999e-05 ***
+# Residuals 51 0.51126 0.010025     
+
+#genotype
+beta <- betadisper(coral_bray_data, sample_data(phy_filtered_r1000_rele5_sqrt_coral)$genotype)
+disper.test = permutest(beta, permutations =10000)
+disper.test #OK
+
+#tank
+beta <- betadisper(coral_bray_data, sample_data(phy_filtered_r1000_rele5_sqrt_coral)$tank)
+disper.test = permutest(beta, permutations =10000)
+disper.test #OK
+```
+
+####Corals + water filters 
+```{r}
+phy_bac_10e3_r_105_sqrt_cwf <- subset_samples(phy_filtered_r1000_rele5_sqrt, type != "diet")
+phy_bac_10e3_r_105_sqrt_cwf = prune_taxa(taxa_sums(phy_bac_10e3_r_105_sqrt_cwf) > 0, phy_bac_10e3_r_105_sqrt_cwf) #remove  #remove unobserved ASVs (sum 0 across all samples)
+
+cwf_adonis_data = as (sample_data(phy_bac_10e3_r_105_sqrt_cwf), "data.frame")
+cwf_bray_data = phyloseq::distance(phy_bac_10e3_r_105_sqrt_cwf,'bray') 						    
+#cwf_adonis <- adonis2(cwf_bray_data ~ treatment*type, data=cwf_adonis_data,  permutations = 10000, method = "bray") 
+#save(cwf_adonis, file = "../models/cwf_adonis.RData")
+load("../models/cwf_adonis.RData")
+cwf_adonis
+#                Df SumOfSqs      R2       F    Pr(>F)    
+# treatment       8    8.380 0.25945  4.0528 9.999e-05 ***
+# type            1    4.134 0.12798 15.9934 9.999e-05 ***
+# treatment:type  7    3.760 0.11643  2.0785 9.999e-05 ***
+# Residual       62   16.025 0.49614                      
+# Total          78   32.299 1.00000 
+
+## dispersion ##
+#treatment
+beta <- betadisper(cwf_bray_data, sample_data(phy_bac_10e3_r_105_sqrt_cwf)$treatment)
+disper.test = permutest(beta, permutations =10000)
+disper.test #dispersion <0.05, not OK
+
+#type
+beta <- betadisper(cwf_bray_data, sample_data(phy_bac_10e3_r_105_sqrt_cwf)$type)
+disper.test = permutest(beta, permutations =10000)
+disper.test #OK
+
+#genotype
+beta <- betadisper(cwf_bray_data, sample_data(phy_bac_10e3_r_105_sqrt_cwf)$genotype)
+disper.test = permutest(beta, permutations =10000)
+disper.test #OK
+
+#tank
+beta <- betadisper(cwf_bray_data, sample_data(phy_bac_10e3_r_105_sqrt_cwf)$tank)
+disper.test = permutest(beta, permutations =10000)
+disper.test #OK
+```
+
+###Indicator species
+####Coral  
+#####Family level
+```{r}
+phy_filtered_r1000_rele5_Fm_2_coral <- subset_samples(c_phy_filtered_r1000_rele5_Fm_2, type == "coral")
+
+coral_idc_table_fam = as(otu_table(phy_filtered_r1000_rele5_Fm_2_coral), "matrix")
+if(taxa_are_rows(phy_filtered_r1000_rele5_Fm_2_coral)){coral_idc_table_fam <- t(coral_idc_table_fam)} # transpose
+
+# Coerce to data.frame
+coral_idc_table_fam = as.data.frame(coral_idc_table_fam)
+coral_idc_data_fam = as (sample_data(phy_filtered_r1000_rele5_Fm_2_coral), "data.frame")
+
+#coral_idsp_fam <- multipatt(coral_idc_table_fam, coral_idc_data_fam$treatment, func = "r.g", control = how(nperm=9999))
+
+#save(coral_idsp_fam, file = "../models/coral_idsp_fam.RData")
+load("../models/coral_idsp_fam.RData")
+
+summary(coral_idsp_fam, alpha = 0.05)    
+```
+
+######For each treatment 
+######Keeping only sig + adding tax and abund
+```{r}
+#getting taxa info for coral associated species
+corals_taxa_otus_fam <- tax_table(phy_filtered_r1000_rele5_Fm_2_coral) |> 
+  as.data.frame() |> 
+  tibble::rownames_to_column("otu")
+
+#getting abundance info for coral associated species
+corals_taxa_abundance_fam <- otu_table(phy_filtered_r1000_rele5_Fm_2_coral) |> 
+  as.data.frame() |> 
+  tibble::rownames_to_column("otu")
+
+#only sig (<0.05) indicator species
+sig.otus_fam <- coral_idsp_fam$sign |> 
+  tibble::rownames_to_column("otu") |>  
+  filter(p.value < 0.05)
+
+#merge taxa info with the indicator species
+sig_otus_taxa_fam <- merge(corals_taxa_otus_fam,sig.otus_fam,by="otu") 
+
+#merge abundance info with the indicator species
+sig_otus_taxa_ab_fam <- merge(sig_otus_taxa_fam, corals_taxa_abundance_fam, by = "otu")
+```
+
+######Summary
+```{r}
+sig_otus_taxa_ab_fam <- sig_otus_taxa_ab_fam |> 
+  rowwise(Family) |> 
+  dplyr::mutate(cross = sum(c_across(colnames(dplyr::select(sig_otus_taxa_ab, starts_with("s."))))))
+
+
+control_sig_means_fam2 <- sig_otus_taxa_ab_fam |> 
+  filter(s.Control == 1, cross == 1) |>  
+  group_by(Family) |>  
+  dplyr::summarise(across(starts_with("C-T"), sum)) |> 
+  rowwise(Family) |> 
+  dplyr::mutate(mean_ab_per = 100*mean(c_across(colnames(dplyr::select(sig_otus_taxa_ab, starts_with("C-T"))))), 
+                sd_ab_per = 100*sd(c_across(colnames(dplyr::select(sig_otus_taxa_ab, starts_with("C-T"))))), 
+                treatment = "control") |> 
+  arrange(desc(mean_ab_per)) |>  
+  dplyr::select(treatment, Family, mean_ab_per, sd_ab_per)
+
+field_sig_means_fam2 <- sig_otus_taxa_ab_fam |> 
+  filter(s.Field == 1, cross == 1) |>  
+  group_by(Family) |>  
+  dplyr::summarise(across(starts_with("FL-T"), sum)) |> 
+  rowwise(Family) |> 
+  dplyr::mutate(mean_ab_per = 100*mean(c_across(colnames(dplyr::select(sig_otus_taxa_ab, starts_with("FL-T"))))), 
+                sd_ab_per = 100*sd(c_across(colnames(dplyr::select(sig_otus_taxa_ab, starts_with("FL-T"))))), 
+                treatment = "field" ) |> 
+  arrange(desc(mean_ab_per)) |>  
+  dplyr::select(treatment, Family, mean_ab_per, sd_ab_per)
+
+mix_sig_means_fam2 <- sig_otus_taxa_ab_fam |> 
+  filter(s.Mix == 1, cross == 1) |>  
+  group_by(Family) |>  
+  dplyr::summarise(across(starts_with("M-T"), sum)) |> 
+  rowwise(Family) |> 
+  dplyr::mutate(mean_ab_per = 100*mean(c_across(colnames(dplyr::select(sig_otus_taxa_ab, starts_with("M-T"))))), 
+                sd_ab_per = 100*sd(c_across(colnames(dplyr::select(sig_otus_taxa_ab, starts_with("M-T"))))), 
+                treatment = "mix" ) |> 
+  arrange(desc(mean_ab_per)) |>  
+  dplyr::select(treatment, Family, mean_ab_per, sd_ab_per) 
+
+fish_sig_means_fam2 <- sig_otus_taxa_ab_fam |> 
+  filter(s.Fish == 1, cross == 1) |>  
+  group_by(Family) |>  
+  dplyr::summarise(across(starts_with("F-T"), sum)) |> 
+  rowwise(Family) |> 
+  dplyr::mutate(mean_ab_per = 100*mean(c_across(colnames(dplyr::select(sig_otus_taxa_ab, starts_with("F-T"))))), 
+                sd_ab_per = 100*sd(c_across(colnames(dplyr::select(sig_otus_taxa_ab, starts_with("F-T"))))), 
+                treatment = "fish" ) |> 
+  arrange(desc(mean_ab_per)) |>  
+  dplyr::select(treatment, Family, mean_ab_per, sd_ab_per)
+
+pellets_sig_means_fam2 <- sig_otus_taxa_ab_fam |> 
+  filter(s.Pellets == 1, cross == 1) |>  
+  group_by(Family) |>  
+  dplyr::summarise(across(starts_with("P-T"), sum)) |> 
+  rowwise(Family) |> 
+  dplyr::mutate(mean_ab_per = 100*mean(c_across(colnames(dplyr::select(sig_otus_taxa_ab, starts_with("P-T"))))), 
+                sd_ab_per = 100*sd(c_across(colnames(dplyr::select(sig_otus_taxa_ab, starts_with("P-T"))))), 
+                treatment = "pellets" ) |> 
+  arrange(desc(mean_ab_per)) |>  
+  dplyr::select(treatment, Family, mean_ab_per, sd_ab_per)
+
+livefeeds_sig_means_fam2 <- sig_otus_taxa_ab_fam |> 
+  filter(s.LiveFeeds == 1, cross == 1) |>  
+  group_by(Family) |>  
+  dplyr::summarise(across(starts_with("L-T"), sum)) |> 
+  rowwise(Family) |> 
+  dplyr::mutate(mean_ab_per = 100*mean(c_across(colnames(dplyr::select(sig_otus_taxa_ab, starts_with("L-T"))))), 
+                sd_ab_per = 100*sd(c_across(colnames(dplyr::select(sig_otus_taxa_ab, starts_with("L-T"))))), 
+                treatment = "livefeeds" ) |> 
+  arrange(desc(mean_ab_per)) |>  
+  dplyr::select(treatment, Family, mean_ab_per, sd_ab_per)
+
+dissolved_sig_means_fam2 <- sig_otus_taxa_ab_fam |> 
+  filter(s.Dissolved == 1, cross == 1) |>  
+  group_by(Family) |>  
+  dplyr::summarise(across(starts_with("D-T"), sum)) |> 
+  rowwise(Family) |> 
+  dplyr::mutate(mean_ab_per = 100*mean(c_across(colnames(dplyr::select(sig_otus_taxa_ab, starts_with("D-T"))))), 
+                sd_ab_per = 100*sd(c_across(colnames(dplyr::select(sig_otus_taxa_ab, starts_with("D-T"))))), 
+                treatment = "dissolved" ) |> 
+  arrange(desc(mean_ab_per)) |>  
+  dplyr::select(treatment, Family, mean_ab_per, sd_ab_per)
+
+seasim_sig_means_fam2 <- sig_otus_taxa_ab_fam |> 
+  filter(s.SeaSim == 1, cross == 1) |>  
+  group_by(Family) |>  
+  dplyr::summarise(across(starts_with("S-T"), sum)) |> 
+  rowwise(Family) |> 
+  dplyr::mutate(mean_ab_per = 100*mean(c_across(colnames(dplyr::select(sig_otus_taxa_ab, starts_with("S-T"))))), 
+                sd_ab_per = 100*sd(c_across(colnames(dplyr::select(sig_otus_taxa_ab, starts_with("S-T"))))), 
+                treatment = "seasim" ) |> 
+  arrange(desc(mean_ab_per)) |>  
+  dplyr::select(treatment, Family, mean_ab_per, sd_ab_per)
+
+control_sig_means_fam2
+pellets_sig_means_fam2
+livefeeds_sig_means_fam2
+mix_sig_means_fam2
+fish_sig_means_fam2
+dissolved_sig_means_fam2
+field_sig_means_fam2
+seasim_sig_means_fam2 
+```
+
+######Crossover
+```{r}
+field_cross <- sig_otus_taxa_ab_fam |> 
+  filter(s.Field == 1) |>  
+  group_by(Family) |>  
+  dplyr::summarise(name =  "Field", 
+                   sum_control = sum(s.Control),
+                   sum_dissolved = sum(s.Dissolved),
+                   sum_field = sum(s.Field),
+                   sum_fish = sum(s.Fish), 
+                   sum_livefeeds = sum(s.LiveFeeds),
+                   sum_mix = sum(s.Mix),
+                   sum_pellets = sum(s.Pellets),
+                   sum_seasim = sum(s.SeaSim), 
+                   pval = p.value )
+
+mix_cross <- sig_otus_taxa_ab_fam |> 
+  filter(s.Mix == 1) |>  
+  group_by(Family) |>  
+  dplyr::summarise(name =  "Mix", 
+                   sum_control = sum(s.Control),
+                   sum_dissolved = sum(s.Dissolved),
+                   sum_field = sum(s.Field),
+                   sum_fish = sum(s.Fish), 
+                   sum_livefeeds = sum(s.LiveFeeds),
+                   sum_mix = sum(s.Mix),
+                   sum_pellets = sum(s.Pellets),
+                   sum_seasim = sum(s.SeaSim), 
+                   pval = p.value )
+
+control_cross <-sig_otus_taxa_ab_fam |> 
+  filter(s.Control == 1) |>  
+  group_by(Family) |>  
+  dplyr::summarise(name =  "control", 
+                   sum_control = sum(s.Control),
+                   sum_dissolved = sum(s.Dissolved),
+                   sum_field = sum(s.Field),
+                   sum_fish = sum(s.Fish), 
+                   sum_livefeeds = sum(s.LiveFeeds),
+                   sum_mix = sum(s.Mix),
+                   sum_pellets = sum(s.Pellets),
+                   sum_seasim = sum(s.SeaSim), 
+                   pval = p.value )
+
+livefeeds_cross <-sig_otus_taxa_ab_fam |> 
+  filter(s.LiveFeeds == 1) |>  
+  group_by(Family) |>  
+  dplyr::summarise(name =  "livefeeds", 
+                   sum_control = sum(s.Control),
+                   sum_dissolved = sum(s.Dissolved),
+                   sum_field = sum(s.Field),
+                   sum_fish = sum(s.Fish), 
+                   sum_livefeeds = sum(s.LiveFeeds),
+                   sum_mix = sum(s.Mix),
+                   sum_pellets = sum(s.Pellets),
+                   sum_seasim = sum(s.SeaSim), 
+                   pval = p.value )
+
+fish_cross <-sig_otus_taxa_ab_fam |> 
+  filter(s.Fish == 1) |>  
+  group_by(Family) |>  
+  dplyr::summarise(name =  "fish", 
+                   sum_control = sum(s.Control),
+                   sum_dissolved = sum(s.Dissolved),
+                   sum_field = sum(s.Field),
+                   sum_fish = sum(s.Fish), 
+                   sum_livefeeds = sum(s.LiveFeeds),
+                   sum_mix = sum(s.Mix),
+                   sum_pellets = sum(s.Pellets),
+                   sum_seasim = sum(s.SeaSim), 
+                   pval = p.value )
+
+dissolved_cross <-sig_otus_taxa_ab_fam |> 
+  filter(s.Dissolved == 1) |>  
+  group_by(Family) |>  
+  dplyr::summarise(name =  "dissolved", 
+                   sum_control = sum(s.Control),
+                   sum_dissolved = sum(s.Dissolved),
+                   sum_field = sum(s.Field),
+                   sum_fish = sum(s.Fish), 
+                   sum_livefeeds = sum(s.LiveFeeds),
+                   sum_mix = sum(s.Mix),
+                   sum_pellets = sum(s.Pellets),
+                   sum_seasim = sum(s.SeaSim), 
+                   pval = p.value )
+
+pellets_cross <-sig_otus_taxa_ab_fam |> 
+  filter(s.Pellets == 1) |>  
+  group_by(Family) |>  
+  dplyr::summarise(name =  "pellets", 
+                   sum_control = sum(s.Control),
+                   sum_dissolved = sum(s.Dissolved),
+                   sum_field = sum(s.Field),
+                   sum_fish = sum(s.Fish), 
+                   sum_livefeeds = sum(s.LiveFeeds),
+                   sum_mix = sum(s.Mix),
+                   sum_pellets = sum(s.Pellets),
+                   sum_seasim = sum(s.SeaSim), 
+                   pval = p.value)
+
+seasim_cross <-sig_otus_taxa_ab_fam |> 
+  filter(s.SeaSim == 1) |>  
+  group_by(Family) |>  
+  dplyr::summarise(name =  "post-acclimation", 
+                   sum_control = sum(s.Control),
+                   sum_dissolved = sum(s.Dissolved),
+                   sum_field = sum(s.Field),
+                   sum_fish = sum(s.Fish), 
+                   sum_livefeeds = sum(s.LiveFeeds),
+                   sum_mix = sum(s.Mix),
+                   sum_pellets = sum(s.Pellets),
+                   sum_seasim = sum(s.SeaSim), 
+                   pval = p.value )
+
+control_cross
+pellets_cross
+livefeeds_cross
+mix_cross
+fish_cross
+dissolved_cross
+field_cross
+seasim_cross
+```
+
+##RDA Corals + WF, Family level 
+###Data prep
+```{r} 
+#####Get species comp data
+c_phy_filtered_r1000_rele5_coralwf <- subset_samples(c_phy_filtered_r1000_rele5, type != "diet")  
+
+c_phy_filtered_r1000_rele5_coralwf_Fam <- tax_glom(c_phy_filtered_r1000_rele5_coralwf, taxrank = 'Family') #agglomerate data (merging taxa of the same Family)
+c_phy_filtered_r1000_rele5_coralwf_Fam <- prune_taxa(taxa_sums(c_phy_filtered_r1000_rele5_coralwf_Fam) > 0, c_phy_filtered_r1000_rele5_coralwf_Fam) 
+
+c_phy_filtered_r1000_rele5_coralwf_Fam_rel = transform_sample_counts(c_phy_filtered_r1000_rele5_coralwf_Fam, function(x){x / sum(x)}) #change to relative freq out of filtered sample
+c_phy_filtered_r1000_rele5_coralwf_Fam_rel = prune_taxa(taxa_sums(c_phy_filtered_r1000_rele5_coralwf_Fam_rel) > 0, c_phy_filtered_r1000_rele5_coralwf_Fam_rel) #remove unobserved ASVs (sum 0 across all samples)
+
+coralwf_rda_data_fam <- phyloseq::otu_table(c_phy_filtered_r1000_rele5_coralwf_Fam_rel, taxa_are_rows) 
+coralwf_rda_data_fam <- t(coralwf_rda_data_fam) |> as.data.frame()  #get ASV table and transpose so species are columns, samples are rows
+
+###Hellinger transformation
+
+coralwf_rda_data_hel_fam <- decostand(coralwf_rda_data_fam, method = "hellinger")
+
+### Variables
+coralwf_rda_info_fam <- sample_data(c_phy_filtered_r1000_rele5_coralwf_Fam_rel) |> as.data.frame() #get sample data
+coralwf_rda_info_fam <- coralwf_rda_info_fam |> mutate(treatment = as.factor(treatment)) 
+
+```
+
+###Run RDA
+```{r}
+rda_model_coralwf_fam <- rda(coralwf_rda_data_hel_fam ~ coralwf_rda_info_fam$treatment +  coralwf_rda_info_fam$type)
+```
+
+###Redundancy plot
+####Getting data ready
+```{r}
+#separate by sites (treatment/sample) and species (asv)
+rda_model_coralwf_plot_sites_fam <- rda_model_coralwf_fam |> 
+  vegan::scores(tidy = TRUE) |> 
+  dplyr::filter(score == "sites")
+
+rda_model_coralwf_plot_species_fam <- rda_model_coralwf_fam |> 
+  vegan::scores(tidy = TRUE) |> 
+  dplyr::filter(score == "species")   
+
+##Only influential ones (arbitary cutoff, based off known influential species from other analysis)
+rda_model_coralwf_plot_species_filt_fam <- rda_model_coralwf_plot_species_fam |> 
+  dplyr::filter(abs(RDA1) > 0.05 | abs(RDA2) > 0.05) |>  
+  dplyr::mutate(otu = label)
+
+#Assign taxa info to ASVs
+
+  #getting taxa info for coral associated species
+coralswf_taxa_otus_rda_fam <- tax_table(c_phy_filtered_r1000_rele5_coralwf_Fam_rel) |> 
+  as.data.frame() |> 
+  tibble::rownames_to_column("otu")
+
+#merge taxa info with the indicator species, remove uncultured/unknown
+rda_model_coralwf_plot_species_filt_taxa_fam  <- merge(coralswf_taxa_otus_rda_fam,rda_model_coralwf_plot_species_filt_fam,by="otu") 
+rda_model_coralwf_plot_species_filt_taxa_fam <- rda_model_coralwf_plot_species_filt_taxa_fam |>  
+  dplyr::filter(Family != "uncultured")
+rda_model_coralwf_plot_species_filt_taxa_fam <- rda_model_coralwf_plot_species_filt_taxa_fam |>  
+  dplyr::filter(Family != "Unknown_Family")
+
+rda_model_coralwf_plot_species_filt_taxa_fam <- 
+  rda_model_coralwf_plot_species_filt_taxa_fam |>  
+  dplyr::group_by(Family) |>  
+  dplyr::mutate(R = abs(mean(RDA1)) + abs(mean(RDA2))) |>  
+  dplyr::arrange(desc(R))  
+
+rda_model_coralwf_plot_species_filt_taxa_fam_filt_fam <- 
+  rda_model_coralwf_plot_species_filt_taxa_fam |>  
+  filter( R > 0.258) 
+
+#add type*treatment variable 
+coralwf_rda_info_fam$type_treat <- paste(coralwf_rda_info_fam$type, "_", coralwf_rda_info_fam$treatment)
+
+#grouping water filters, (field, post, fish, mix) and (livefeeds, control, pellets, dissolved)
+test <- within(rda_model_coralwf_plot_sites_fam, type <- coralwf_rda_info_fam$type)
+test <- within(test, treatment <- coralwf_rda_info_fam$treatment)
+ellipse_plot_data <- test |>  
+  dplyr::mutate(type_no = ifelse(type == "coral", 1, 0), 
+                treatment_no = ifelse(treatment %in% c("Field", "Fish", "Mix", "SeaSim"), 2, 1)) |>  
+  dplyr::mutate(ellipse_group = as.factor(type_no * treatment_no))
+
+```
+
+####Plot with ellipses
+```{r}
+
+rda_coralwf_fam <- 
+  ggplot(rda_model_coralwf_plot_sites_fam, aes(RDA1, RDA2)) +
+  geom_point(aes(colour = factor(coralwf_rda_info_fam$treatment), shape = coralwf_rda_info_fam$type), size = 3, stroke = 1) + 
+   scale_colour_manual(values = group.colors, 
+                      breaks = level_order_microbe_new, 
+                      labels = level_names_microbe_new, 
+                      name = "Treatment") +   
+  scale_shape_manual(values = c(21, 24),
+                     labels = c("Coral", "Water"), 
+                     name = "Sample type") +
+  geom_vline(xintercept = 0, colour = "lightgrey", linetype = 2) + 
+  geom_hline(yintercept = 0, colour = "lightgrey", linetype = 2) +
+  stat_ellipse(data = ellipse_plot_data, 
+               aes(group = type, linetype = type), type = "norm") +  
+  scale_linetype_manual(values = c(1, 2), 
+                        guide = "none") +
+  geom_segment(data = rda_model_coralwf_plot_species_filt_taxa_fam_filt_fam,
+               aes(x = 0, y = 0, xend = RDA1, yend = RDA2, colour = "black"),
+               linewidth = 1,
+               arrow = arrow(length = unit(0.2, "cm"))) + 
+  geom_text_repel(data = arrows_labels,
+            aes(label=Family),
+            size=5) +
+   theme(plot.background = element_blank(),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(colour = "black", size = 1, fill = NA),
+        axis.line = element_blank(),
+        axis.text.y = element_text(size = 12, colour = "black"), 
+        axis.text.x = element_text(angle=0, hjust=0.5, vjust=1, size = 12, colour = "black"), 
+        legend.position="right", 
+        legend.title=element_text(size=13),
+        legend.text = element_text(size = 12, colour = "black")) + 
+  scale_x_continuous(breaks = c(-0.5, 0.5, 0, 1.0, 1.5), 
+                     limits = c(-0.7, 1.3)) + 
+  scale_y_continuous(breaks = c(-0.8, -0.4, 0, 0.4, 0.8),
+                     limits = c(-0.9, 0.7))
+```
+
+#Composition plots
+##Merge
+###'Class'
+```{r}
+phy_filtered_r1000_rele5_Cl <- tax_glom(c_phy_filtered_r1000_rele5, taxrank = 'Class') #agglomerate data (merging taxa of the same Class)
+phy_filtered_r1000_rele5_Cl_2 <- prune_taxa(taxa_sums(phy_filtered_r1000_rele5_Cl) > 0, phy_filtered_r1000_rele5_Cl)
+```
+
+###'Family'
+```{r}
+c_phy_filtered_r1000_rele5_Fm <- tax_glom(c_phy_filtered_r1000_rele5, taxrank = 'Family') #agglomerate data (merging taxa of the same Family)
+c_phy_filtered_r1000_rele5_Fm_2 <- prune_taxa(taxa_sums(c_phy_filtered_r1000_rele5_Fm) > 0, c_phy_filtered_r1000_rele5_Fm)
+```
+
+
+####Bubble plot 
+#####Top 15-fam sample
+```{r}
+#just corals, relative ab, no 0 families
+c_phy_filtered_r1000_rele5_Fm_2_coral <- subset_samples(c_phy_filtered_r1000_rele5_Fm_2, type == "coral")
+c_phy_filtered_r1000_rele5_Fm_2_coral_rel = transform_sample_counts(c_phy_filtered_r1000_rele5_Fm_2_coral, function(x){x / sum(x)}) 
+c_phy_filtered_r1000_rele5_Fm_2_coral_rel <- prune_taxa(taxa_sums(c_phy_filtered_r1000_rele5_Fm_2_coral_rel) > 0, c_phy_filtered_r1000_rele5_Fm_2_coral_rel) 
+
+#get data in right form
+c_coral_family_treat_melt <- psmelt(c_phy_filtered_r1000_rele5_Fm_2_coral_rel) 
+
+index_1c_s <- c_coral_family_treat_melt |> 
+    dplyr::group_by(OTU, Sample, Family) |> 
+    dplyr::summarise(Mean = mean(Abundance)) |> 
+    arrange(desc(Mean)) |> 
+    dplyr::ungroup()
+
+index_2c_s <- index_1c_s |> 
+  group_by(Family) |>  
+  dplyr::summarise(Mean_overall = mean(Mean)) |> 
+  arrange(desc(Mean_overall)) |> 
+  dplyr::mutate(Index = 1:n()) 
+
+coral_join_1c_s <- c_coral_family_treat_melt |> 
+    dplyr::group_by(OTU, Sample, Family) |> 
+    dplyr::summarise(Mean = mean(Abundance)) |> 
+    arrange(desc(Mean)) |> 
+    dplyr::ungroup()
+
+coral_join_2c_s <- power_full_join(coral_join_1c_s, index_2c_s, by = "Family")
+
+coral_family_treat_melt_meanc_s <- coral_join_2c_s|> 
+    dplyr::mutate(Family = base::ifelse(Index > 30, "Other", Family))
+
+#joining abundance and metadata
+sample_metadata <- sample_data(c_phy_filtered_r1000_rele5_Fm_2_coral_rel)
+sample_metadata <- datawizard::rownames_as_column(sample_metadata)
+sample_metadata <- sample_metadata |>  
+  dplyr::rename(Sample = rowname)
+coral_fam_bubble_15_s <- coral_join_2c_s|> 
+    dplyr::mutate(Family = base::ifelse(Index > 15, "Other", Family))
+coral_fam_bubble_15_s <- coral_fam_bubble_15_s |> 
+  dplyr::filter(Family != "Other") 
+coral_fam_bubble_15_s_data <- power_full_join(coral_fam_bubble_15_s, sample_metadata, by = "Sample")
+
+#get number order for treatments to roder correctly in plot
+treat_nums <- as.data.frame(seq(1, 8, 1)) |>  
+    dplyr::rename(num = `seq(1, 8, 1)`) 
+treatment_ord <- as.data.frame(level_order_microbe_new) |> 
+   dplyr::rename(treatment = level_order_microbe_new)
+level_order_microbe_new_nums <- cbind(treat_nums, treatment_ord)
+coral_fam_bubble_15_s_data <- power_full_join(coral_fam_bubble_15_s_data, level_order_microbe_new_nums, by = "treatment")
+
+coral_fam_bubble_15_s_data <- coral_fam_bubble_15_s_data |> 
+  dplyr::group_by(num, Sample) |> 
+  dplyr::mutate(sample_num_ord = cur_group_id()) |>  
+  dplyr::arrange(sample_num_ord) 
+
+coral_fam_bubble_15_s_data
+
+#colours
+bub_col <- colorRampPalette(brewer.pal(15, "Set2"))(15)
+
+fam_bubble_15_2 <- 
+  ggplot(coral_fam_bubble_15_s_data, aes(x = as.numeric(sample_num_ord), y = fct_reorder(Family, Index, .desc = TRUE), fill = Family)) + 
+  geom_point(aes(size = ifelse(Mean==0, NA, Mean)), pch=21) + 
+  theme_bw() +
+  scale_size(range = c(1,8), 
+             name = "Abundance (%)", 
+             breaks = c(0.25, 0.5, 0.75),
+             labels = c("25", "50", "75")) +
+    scale_fill_manual(values = bub_col, 
+                    guide = "none") +
+  theme(plot.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        axis.line = element_line(colour = "black"),
+        axis.ticks.y=element_blank(),
+        axis.text.y = element_text(size = 12, colour = "black"), 
+        axis.text.x = element_text(face = "bold", angle=0, hjust=0.5, vjust=1, size = 12, colour = "black"), 
+        legend.position="top", 
+        legend.title=element_text(size=14),
+        legend.text = element_text(size = 14, colour = "black")) +  
+   scale_x_continuous(breaks = c(5, 12.5, 17.5, 24.5, 32, 40.5, 49.5, 55.5),
+                      limits = c(1, 59), 
+                      labels = stringr::str_wrap(level_names_microbe_new,11), 
+                      expand = c(0.01,0.05)) + 
+  scale_y_discrete(expand = c(0.03,0.05)) +
+  geom_vline(xintercept = c(9.5, 15.5, 19.5, 29.5, 34.5, 47.5, 51.5)) + 
+  labs (y = "", x = "")
+
+fam_bubble_15_2
+```
+
+#####Top 15-class sample
+```{r}
+#just corals, relative ab, no 0 families
+phy_filtered_r1000_rele5_Cl_2_coral <- subset_samples(phy_filtered_r1000_rele5_Cl_2, type == "coral")
+phy_filtered_r1000_rele5_Cl_2_coral_rel = transform_sample_counts(phy_filtered_r1000_rele5_Cl_2_coral, function(x){x / sum(x)}) 
+phy_filtered_r1000_rele5_Cl_2_coral_rel <- prune_taxa(taxa_sums(phy_filtered_r1000_rele5_Cl_2_coral_rel) > 0, phy_filtered_r1000_rele5_Cl_2_coral_rel) 
+
+#get data in right form
+c_coral_class_treat_melt <- psmelt(phy_filtered_r1000_rele5_Cl_2_coral_rel) 
+
+index_1c_s_class <- c_coral_class_treat_melt |> 
+    dplyr::group_by(OTU, Sample, Class) |> 
+    dplyr::summarise(Mean = mean(Abundance)) |> 
+    arrange(desc(Mean)) |> 
+    dplyr::ungroup()
+
+index_2c_s_class <- index_1c_s_class |> 
+  group_by(Class) |>  
+  dplyr::summarise(Mean_overall = mean(Mean)) |> 
+  arrange(desc(Mean_overall)) |> 
+  dplyr::mutate(Index = 1:n()) 
+
+coral_join_1c_s_class <- c_coral_class_treat_melt |> 
+    dplyr::group_by(OTU, Sample, Class) |> 
+    dplyr::summarise(Mean = mean(Abundance)) |> 
+    arrange(desc(Mean)) |> 
+    dplyr::ungroup()
+
+coral_join_2c_s_class <- power_full_join(coral_join_1c_s_class, index_2c_s_class, by = "Class")
+
+coral_class_treat_melt_meanc_s <- coral_join_2c_s_class|> 
+    dplyr::mutate(Family = base::ifelse(Index > 30, "Other", Class))
+
+#joining abundance and metadata
+sample_metadata_class <- sample_data(phy_filtered_r1000_rele5_Cl_2_coral_rel)
+sample_metadata_class <- datawizard::rownames_as_column(sample_metadata_class)
+sample_metadata_class <- sample_metadata_class |>  
+  dplyr::rename(Sample = rowname)
+coral_class_bubble_15_s <- coral_join_2c_s_class|> 
+    dplyr::mutate(Class = base::ifelse(Index > 15, "Other", Class))
+coral_class_bubble_15_s <- coral_class_bubble_15_s |> 
+  dplyr::filter(Class != "Other") 
+coral_class_bubble_15_s_data <- power_full_join(coral_class_bubble_15_s, sample_metadata_class, by = "Sample")
+
+#get number order for treatments to roder correctly in plot
+treat_nums <- as.data.frame(seq(1, 8, 1)) |>  
+    dplyr::rename(num = `seq(1, 8, 1)`) 
+treatment_ord <- as.data.frame(level_order_microbe_new) |> 
+   dplyr::rename(treatment = level_order_microbe_new)
+level_order_microbe_new_nums <- cbind(treat_nums, treatment_ord)
+coral_class_bubble_15_s_data <- power_full_join(coral_class_bubble_15_s_data, level_order_microbe_new_nums, by = "treatment")
+
+coral_class_bubble_15_s_data <- coral_class_bubble_15_s_data |> 
+  dplyr::group_by(num, Sample) |> 
+  dplyr::mutate(sample_num_ord = cur_group_id()) |>  
+  dplyr::arrange(sample_num_ord) 
+
+coral_class_bubble_15_s_data
+
+#colours
+bub_col <- colorRampPalette(brewer.pal(15, "Set1"))(15)
+
+class_bubble_15_2 <- 
+  ggplot(coral_class_bubble_15_s_data, aes(x = as.numeric(sample_num_ord), y = fct_reorder(Class, Index, .desc = TRUE), fill = Class)) + 
+  geom_point(aes(size = ifelse(Mean==0, NA, Mean)), pch=21) + 
+  theme_bw() +
+  scale_size(range = c(1,8), 
+             name = "Abundance (%)", 
+             breaks = c(0.25, 0.5, 0.75),
+             labels = c("25", "50", "75")) +
+    scale_fill_manual(values = bub_col, 
+                    guide = "none") +
+  theme(plot.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        axis.line = element_line(colour = "black"),
+        axis.ticks.y=element_blank(),
+        axis.text.y = element_text(size = 12, colour = "black"), 
+        axis.text.x = element_text(face = "bold", angle=0, hjust=0.5, vjust=1, size = 12, colour = "black"), 
+        legend.position="top", 
+        legend.title=element_text(size=14),
+        legend.text = element_text(size = 14, colour = "black")) +  
+   scale_x_continuous(breaks = c(5, 12.5, 17.5, 24.5, 32, 40.5, 49.5, 55.5),
+                      limits = c(1, 59), 
+                      labels = stringr::str_wrap(level_names_microbe_new,11), 
+                      expand = c(0.01,0.05)) + 
+  scale_y_discrete(expand = c(0.03,0.05)) +
+  geom_vline(xintercept = c(9.5, 15.5, 19.5, 29.5, 34.5, 47.5, 51.5)) + 
+  labs (y = "", x = "")
+
+class_bubble_15_2
+
+coral_class_bubble_15_s_data |> dplyr::group_by(treatment) |> 
+dplyr::summarise(mean(Sample))
+```
+
+###Water filters 
+####Family 
+#####Top 15- sample
+```{r}
+#just corals, relative ab, no 0 families
+phy_filtered_r1000_rele5_Fm_2_wf <- subset_samples(c_phy_filtered_r1000_rele5_Fm_2, type == "water_filter")
+phy_filtered_r1000_rele5_Fm_2_wf_rel = transform_sample_counts(phy_filtered_r1000_rele5_Fm_2_wf, function(x){x / sum(x)}) 
+phy_filtered_r1000_rele5_Fm_2_wf_rel <- prune_taxa(taxa_sums(phy_filtered_r1000_rele5_Fm_2_wf_rel) > 0, phy_filtered_r1000_rele5_Fm_2_wf_rel) 
+
+#get data in right form
+wf_family_treat_melt <- psmelt(phy_filtered_r1000_rele5_Fm_2_wf_rel) 
+
+wf_index_1c_s <- wf_family_treat_melt |> 
+    dplyr::group_by(OTU, Sample, Family) |> 
+    dplyr::summarise(Mean = mean(Abundance)) |> 
+    arrange(desc(Mean)) |> 
+    dplyr::ungroup()
+
+wf_index_2c_s <- wf_index_1c_s |> 
+  group_by(Family) |>  
+  dplyr::summarise(Mean_overall = mean(Mean)) |> 
+  arrange(desc(Mean_overall)) |> 
+  dplyr::mutate(Index = 1:n()) 
+
+wf_join_1c_s <- wf_family_treat_melt |> 
+    dplyr::group_by(OTU, Sample, Family) |> 
+    dplyr::summarise(Mean = mean(Abundance)) |> 
+    arrange(desc(Mean)) |> 
+    dplyr::ungroup()
+
+wf_join_2c_s <- power_full_join(wf_join_1c_s, wf_index_2c_s, by = "Family")
+
+wf_family_treat_melt_meanc_s <- wf_join_2c_s|> 
+    dplyr::mutate(Family = base::ifelse(Index > 30, "Other", Family))
+
+#joining abundance and metadata
+wf_sample_metadata <- sample_data(phy_filtered_r1000_rele5_Fm_2_wf_rel)
+wf_sample_metadata <- datawizard::rownames_as_column(wf_sample_metadata)
+wf_sample_metadata <- wf_sample_metadata |>  
+  dplyr::rename(Sample = rowname)
+wf_fam_bubble_15_s <- wf_join_2c_s|> 
+    dplyr::mutate(Family = base::ifelse(Index > 15, "Other", Family))
+wf_fam_bubble_15_s <- wf_fam_bubble_15_s |> 
+  dplyr::filter(Family != "Other") 
+wf_fam_bubble_15_s_data <- power_full_join(wf_fam_bubble_15_s, wf_sample_metadata, by = "Sample")
+wf_fam_bubble_15_s_data <- wf_fam_bubble_15_s_data |>  
+  dplyr::filter(treatment != "Banjo")
+
+#get number order for treatments to roder correctly in plot
+treat_nums <- as.data.frame(seq(1, 8, 1)) |>  
+    dplyr::rename(num = `seq(1, 8, 1)`) 
+treatment_ord <- as.data.frame(level_order_microbe_new) |> 
+   dplyr::rename(treatment = level_order_microbe_new)
+level_order_microbe_new_nums <- cbind(treat_nums, treatment_ord)
+wf_fam_bubble_15_s_data <- power_full_join(wf_fam_bubble_15_s_data, level_order_microbe_new_nums, by = "treatment")
+
+ wf_fam_bubble_15_s_data <- wf_fam_bubble_15_s_data |> 
+   dplyr::group_by(num, Sample) |> 
+   dplyr::mutate(sample_num_ord = cur_group_id()) |>  
+   dplyr::arrange(num) 
+
+wf_fam_bubble_15_s_data
+
+#colours
+bub_col_wf <- colorRampPalette(brewer.pal(15, "Set3"))(15)
+
+wf_fam_bubble_15_2 <- 
+  ggplot(wf_fam_bubble_15_s_data, aes(x = as.numeric(sample_num_ord), y = fct_reorder(Family, Index, .desc = TRUE), fill = Family)) + 
+  geom_point(aes(size = ifelse(Mean==0, NA, Mean)), pch=21) + 
+  theme_bw() +
+  scale_size(range = c(1,8), 
+             name = "Abundance (%)", 
+             breaks = c(0.1, 0.3, 0.5),
+             labels = c("10", "30", "50") 
+             )+
+    scale_fill_manual(values = bub_col_wf, 
+                    guide = "none") +
+  theme(plot.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        axis.line = element_line(colour = "black"),
+        axis.ticks.y=element_blank(),
+        axis.text.y = element_text(size = 12, colour = "black"), 
+        axis.text.x = element_text(face = "bold", angle=0, hjust=0.5, vjust=1, size = 12, colour = "black"), 
+        legend.position="top", 
+        legend.title=element_text(size=14),
+        legend.text = element_text(size = 14, colour = "black")) +  
+   scale_x_continuous(breaks = c(2, 4.5, 6.5, 9, 11.5, 13.5, 16, 18.5),
+                      limits = c(1, 19), 
+                      labels = stringr::str_wrap(level_names_microbe_new, 9), 
+                      expand = c(0.03,0.05)) + 
+  scale_y_discrete(expand = c(0.03,0.05)) +
+  geom_vline(xintercept = c(3.5, 5.5, 7.5, 10.5, 12.5, 14.5, 17.5)) + 
+  labs (y = "", x = "")
+
+wf_fam_bubble_15_2
+```
+

@@ -1,0 +1,1153 @@
+---
+title: "fcn_FA"
+format: html
+editor: source
+---
+
+# Preparations
+```{r Preperations}
+#| label: libraries
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: false
+
+library(tidyverse) #for data wrangling
+library(cmdstanr)   #for cmdstan
+library(brms)       #for fitting models in STAN
+library(standist)   #for visualizing distributions
+library(HDInterval) #for HPD intervals
+library(posterior)  #for posterior draws
+library(coda)       #for diagnostics
+library(bayesplot)  #for diagnostics
+library(ggmcmc)     #for MCMC diagnostics
+library(rstan)      #for interfacing with STAN
+library(effects)   #for partial effects plots
+library(car)       #for regression diagnostics
+library(broom)     #for tidy output
+library(ggfortify) #for model diagnostics
+library(sjPlot)    #for outputs
+library(knitr)     #for kable
+library(emmeans)   #for estimating marginal means
+library(MASS)      #for glm.nb
+library(MuMIn)     #for AICc
+library(tidybayes)
+library(broom.mixed)#for tidying MCMC outputs
+library(patchwork)  #for multiple plots
+library(ggeffects)
+library(DHARMa)
+library(ggridges)
+library(bayestestR) #for ROPE
+library(see)        #for some plots
+library(easystats)     #framework for stats, modelling and visualisation 
+library(dplyr)
+library(factoextra)
+library(ggplot2)
+library(vegan)
+library(dplyr)
+library(indicspecies)
+library(plyr) 
+source('../helperFunctions.R')  
+source('../multivar_helperFunctions.R')  
+``` 
+
+##Read in data
+```{r readData, results='markdown', eval=TRUE}
+data_FA <- read_csv('../data/FA_data_rownames.csv', trim_ws = TRUE) 
+coral_FA <- data_FA |> filter(row_number() <= 140) 
+
+var_FA <- read_csv('../data/FA_sample_info.csv', trim_ws = TRUE)  
+var_FA <- var_FA |> mutate(genotype = as.factor(genotype), 
+                           treatment = as.factor(treatment), 
+                           tank = as.factor(tank))
+coral_FA_var <- var_FA |> filter(row_number() <= 140) |> droplevels() 
+
+data_FA_sum <- read_csv('../data/FA_data_sum.csv', trim_ws = TRUE) 
+data_FA_sum$tank_rand <- paste(data_FA_sum$treatment,data_FA_sum$tank)
+data_FA_sum <- data_FA_sum |> mutate(genotype = as.factor(genotype), 
+                           treatment = as.factor(treatment), 
+                           tank = as.factor(tank), 
+                           tank_rand = as.factor(tank_rand))
+coral_FA_sum <- data_FA_sum |> filter(row_number() <= 140) 
+
+FA_PUFA_all <- read_csv('../data/FA_PUFA_all.csv', trim_ws = TRUE) 
+FA_PUFA_all$tank_rand <- paste(FA_PUFA_all$treatment,FA_PUFA_all$tank)
+FA_PUFA_all <- FA_PUFA_all |> dplyr::mutate(treatment = as.factor(treatment), 
+                                            tank_rand = as.factor(tank_rand))
+coral_PUFA <- FA_PUFA_all |> dplyr::filter(type == "coral")
+
+coral_FA_sum <- coral_FA_sum |>  
+  dplyr::mutate(LC_PUFA_n3_6 = LC_PUFA_n6 + LC_PUFA_n3, 
+                PUFA_n3_6 = PUFA_n3 + PUFA_n6, 
+                LC_n3n6 = LC_PUFA_n3/LC_PUFA_n6, 
+                PUFA_n3_n6 =  LC_PUFA_n3/LC_PUFA_n6)
+
+```
+
+##Visualisation set-up
+```{r}
+#| label: Visualisation_set-up
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+group.colors.PCA <- c(Control = "#999999", Dissolved = "#E69F00", Fish = "#56B4E9", LiveFeeds = "#009E73", `LiveFeeds + Fish` = "#F0E442", Pellets = "#0072B2", Field = "#D55E00", `Post-acclimation` = "#CC79A7" ) 
+
+coral_FA_var$treatment <- recode_factor(coral_FA_var$treatment, 
+                              Mix = "LiveFeeds + Fish",
+                            SeaSim = "Post-acclimation")
+```
+
+#PCA
+
+##Points
+```{r}
+#| label: PCA_points
+coral_FA 
+which(apply(coral_FA, 2, var)==0) 
+
+coral_FA_pdata <- within(coral_FA, rm("18:2n-6 t"))
+
+coral.pca <- prcomp(coral_FA_pdata, scale = TRUE)
+
+FA_PCA_plot_points <- 
+fviz_pca_biplot(coral.pca,
+                col.ind = coral_FA_var$treatment,
+                palette = group.colors.PCA,
+                addEllipses = TRUE,
+                ellipse.level = 0.95,
+                #ellipse.type = "confidence",
+                legend.title = "Treatments",
+                label = c("none"), 
+                invisible = c("var"),
+                title = " ") + 
+  scale_y_continuous(limits = c(-10, 12)) +
+  scale_x_continuous(limits = c(-11, 12)) +
+  theme(legend.position = "bottom",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = 'black', fill = NA),
+        plot.background=element_blank()) 
+
+FA_PCA_plot_points
+```
+
+##FA arrows
+```{r}
+#| label: PCA_arrows
+coral_FA 
+which(apply(coral_FA, 2, var)==0) 
+
+coral_FA_pdata <- within(coral_FA, rm("18:2n-6 t"))
+
+coral_FA_pdata <- 
+  coral_FA_pdata |>  
+  dplyr::rename("24:0" = `24:00:00`, 
+                "18:3n-3" = `18:3n-3`, 
+                "Unknown 4" = `UNK4`, 
+                "Unknown 1" = `UNK1`,
+                "20:5n-3" = `20:5n-3`, 
+                "20:4n-6" = `20:4n-6`,
+                "22:5n-3" = `22:5n-3`, 
+                "18:4n-3" = `18:4n-3`, 
+                "22:6n-3" = `22:6n-3`, 
+                "17:0" = `17:00`, 
+                "15:0" = `15:00`, 
+                "16:2n-4" = `16:2n-4`, 
+                "20:3n-6" = `20:3n-6`, 
+                "16:0" = `16:00`, 
+                "20:1n-9" = `20:1n-9`)
+
+coral.pca <- prcomp(coral_FA_pdata, scale = TRUE) 
+
+FA_PCA_plot_arrows_15_labeled <- 
+  fviz_pca_biplot(coral.pca,
+             geom = c("arrow", "text"), 
+             repel = TRUE, 
+             col.var = "contrib",
+             invisible ="ind",
+             select.var = list(contrib = 15),
+             title = " ", 
+             legend.title = "Contribution") +  
+  scale_color_gradient2(low="black", 
+                        mid="blue",
+                        high="red", 
+                        midpoint=3.75) +
+  theme_minimal()+
+    scale_y_continuous(limits = c(-10, 12)) +
+  scale_x_continuous(limits = c(-11, 12)) +
+  theme(legend.position = "bottom",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = 'black', fill = NA),
+        plot.background=element_blank()) 
+FA_PCA_plot_arrows_15_labeled 
+```
+
+
+#PERMANOVA
+```{r}
+#| label: ADONIS
+
+adonis2(coral_FA ~ treatment, data=coral_FA_var,  permutations = 10000, method = "bray") 
+#yes difference 
+
+coral_FA_bray <- vegdist(coral_FA, method = "bray")
+
+beta_fa <- betadisper(coral_FA_bray, coral_FA_var$treatment)
+disper.test = permutest(beta_fa, permutations =10000)
+disper.test 
+```
+
+###Pairwise permanova function 
+```{r}
+pairwise_permanova <- function(sp_matrix, group_var, dist = "bray", adj = "BH", perm = 10000) {
+  
+  require(vegan)
+  
+  ## list contrasts
+  group_var <- as.character(group_var)
+  groups <- as.data.frame(t(combn(unique(group_var), m = 2)))
+  
+  contrasts <- data.frame(
+    group1 = groups$V1, group2 = groups$V2,
+    R2 = NA, F_value = NA, df1 = NA, df2 = NA, p_value = NA
+  )
+  
+  for (i in seq(nrow(contrasts))) {
+    sp_subset <- group_var == contrasts$group1[i] | group_var == contrasts$group2[i] 
+    contrast_matrix <- sp_matrix[sp_subset,]
+    
+    ## fit contrast using adonis
+    fit <- vegan::adonis2(
+      contrast_matrix ~ group_var[sp_subset],
+      method = dist, 
+      perm = perm
+    )
+    
+    contrasts$R2[i] <- round(fit$R2[1], digits = 3)
+    contrasts$F_value[i] <- round(fit[["F"]][1], digits = 3)
+    contrasts$df1[i] <- fit$Df[1]
+    contrasts$df2[i] <- fit$Df[2]
+    contrasts$p_value[i] <- fit$`Pr(>F)`[1]
+  }
+  
+  ## adjust p-values for multiple comparisons
+  contrasts$p_value <- round(p.adjust(contrasts$p_value, method = adj), digits = 3)
+  
+  return(list(
+    contrasts = contrasts, 
+    "p-value adjustment" = adj, 
+    permutations = perm
+  ))
+} 
+```
+
+
+##Run pairwise
+```{r}
+coral_FA_pw_permanova <- pairwise_permanova(coral_FA, coral_FA_var$treatment)
+save(coral_FA_pw_permanova, file = "../models/coral_FA_pw_permanova.RData")
+load("../models/coral_FA_pw_permanova.RData")
+coral_FA_pw_permanova
+```
+
+#Indicator FA
+```{r}
+#| label: Indic_FA
+treatment = coral_FA_var$treatment
+coral_FA_idsp <- multipatt(coral_FA, treatment, func = "r.g", control = how(nperm=9999))
+save(coral_FA_idsp, file = "../models/coral_FA_idsp.RData")
+
+load("../models/coral_FA_idsp.RData")
+summary(coral_FA_idsp) 
+```
+
+#PUFA
+####Priors model
+```{r}
+#| label: 1_PUFA
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+PUFA_form <- bf(PUFA_cal ~ treatment + (1|tank_rand:genotype), family = gaussian()) 
+
+coral_PUFA |> dplyr::group_by(treatment) |>  dplyr::summarise(median((PUFA_cal)), mad((PUFA_cal))) 
+
+PUFA_priors <- prior(normal(32.7, 5), class = 'Intercept') + 
+  prior(normal(0, 20), class = 'b') + 
+  prior(student_t(3, 0, 4.5), class = 'sd') + 
+  prior(student_t(3, 0, 4.5), class = 'sigma') 
+
+PUFA.brm1 <- brm(PUFA_form, 
+                 data = coral_PUFA,
+                 prior = PUFA_priors, 
+                 sample_prior = 'only',
+                 iter = 5000, 
+                 warmup = 2500, 
+                 chains = 3, cores = 3, 
+                 thin = 10, 
+                 refresh = 0, 
+                 seed = 123, 
+                 control = list(adapt_delta = 0.99),
+                 backend = "cmdstan") 
+
+PUFA.brm1 |> conditional_effects("treatment") |> plot(points = TRUE)   
+#OK
+```
+
+####With data 
+```{r}
+#| label: 2_PUFA
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+
+PUFA.calc.brm2 <- PUFA.brm1 |> update(sample_prior = "yes",
+                                       refresh = 0, 
+                                 chains = 3, cores = 3,
+                                       iter = 7500,
+                                       warmup = 2500,
+                                       seed = 123) 
+
+PUFA.calc.brm2 |> conditional_effects("treatment") |> plot(points = TRUE)
+
+save(PUFA.calc.brm2, file = "../models/PUFA.calc.brm2.RData")
+load("../models/PUFA.calc.brm2.RData")
+
+```
+
+####MCMC sampling diagnostics
+```{r}
+#| label: 3_PUFA
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true 
+pars <- PUFA.calc.brm2 |> get_variables()
+pars_2 <- str_extract(pars, '^b_.*|^shape*|^sd_.*|^sigma$') |> na.omit() 
+
+#Traceplots
+PUFA.calc.brm2$fit |> stan_trace(pars = pars_2, inc_warmup = TRUE)
+#Autocorrelation
+PUFA.calc.brm2$fit |> stan_ac(pars = pars_2) 
+#Rhat
+PUFA.calc.brm2$fit |> stan_rhat()
+#ESS
+PUFA.calc.brm2$fit |> stan_ess() 
+#Summary
+summary(PUFA.calc.brm2) 
+```
+
+####Posterior probablity checks
+```{r}
+#| label: 4_PUFA
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+PUFA.calc.brm2 |> pp_check(type = 'dens_overlay', ndraws = 200) + theme_classic()
+#OK
+```
+
+
+####DHARMA residuals
+```{r}
+#| label: 5_PUFA
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+coral.resids <- make_brms_dharma_res(PUFA.calc.brm2, integerResponse = FALSE)
+
+wrap_elements(~testUniformity(coral.resids)) + 
+  wrap_elements(~plotResiduals(coral.resids, quantreg = FALSE)) +
+  wrap_elements(~testDispersion(coral.resids))
+#OK
+```
+
+####Means
+```{r}
+#| label: 6_PUFA
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+load("../models/PUFA.calc.brm2.RData")
+
+PUFA.means_mgg <- PUFA.calc.brm2 |> 
+  emmeans(~treatment, type = 'response') |> 
+  as.data.frame() |> 
+  mutate(emmean = 10*emmean, 
+         lower.HPD = 10*lower.HPD, 
+         upper.HPD = 10*upper.HPD) 
+PUFA.means_mgg
+
+ggplot(data = PUFA.means_mgg, aes(x=factor(treatment, levels = level_order_new), y = emmean, colour = treatment)) + 
+  geom_point(data = coral_FA_sum, aes(x = factor(treatment, levels = level_order_new), y = 10*PUFA), colour = "black", alpha = 0.5, size = 0.5, position = position_jitter(w = 0.1, h = 0))+
+  geom_pointrange(aes(ymin = lower.HPD, ymax = upper.HPD), fatten = 5) + 
+  theme_classic() +
+  theme(legend.position = "none", 
+        text = element_text(size=15, colour = "black"),
+        axis.text.y = element_text(colour = "black"), 
+        axis.text.x = element_text(colour = "black")) +
+  scale_x_discrete(labels = level_order_new, 
+                   expression(Treatment), 
+                   breaks = waiver()) + 
+  scale_y_continuous(expression(PUFA~(mg~g^-1~FA)), 
+                     limits = c(100, 500))+ 
+    scale_colour_manual(values=group.colors)
+```
+
+####Pairwise comparisons
+```{r}
+#| label: 7_PUFA
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+sTreat <- PUFA.calc.brm2$data |> pull(treatment) |> levels()
+STreat <- rep(1, length(sTreat))
+names(STreat) <- sTreat
+ (PUFA.means)
+PUFA.calc.brm2 |> emmeans(~treatment) |> 
+  gather_emmeans_draws() |>  
+  dplyr::mutate(.value = (.value)) |> 
+  dplyr::ungroup() |>
+  dplyr::group_by(.draw) |> 
+  reframe(fit = data.frame(contrast = rownames(multcomp::contrMat(n = STreat, type = "Tukey")), 
+                           fit = t(as.vector(.value) %*% t(multcomp::contrMat(n = STreat, type = "Tukey"))))) |> 
+  unnest(fit) |> 
+  dplyr::group_by(contrast) |> 
+  dplyr::summarise(median_hdci(fit),
+            Pl = mean(fit<0),
+            Pg = mean(fit>0)) 
+#absolute difference between the treatments
+```
+
+
+#LC PUFA_n3_6 ratio
+####Priors model
+```{r}
+#| label: 1_PUFA
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+LCPUFA_36_form <- bf(LC_n3n6 ~ treatment + (1|tank_rand:genotype), family = Gamma(link = log), shape ~ treatment) 
+
+coral_FA_sum |> dplyr::group_by(treatment) |> dplyr::summarise(log(median((n3n6))), log(mad((n3n6)))) 
+
+LCPUFA_36_priors <- prior(normal(0.7, 1), class = 'Intercept') + 
+  prior(normal(0, 0.5), class = 'b') + 
+  prior(student_t(3, 0, 1), class = 'sd') + 
+  prior(normal(0, 0.5), class = 'b', dpar = 'shape')
+
+LCPUFA.brm1 <- brm(LCPUFA_36_form, 
+                 data = coral_FA_sum,
+                 prior = LCPUFA_36_priors, 
+                 sample_prior = 'only',
+                 iter = 5000, 
+                 warmup = 2500, 
+                 chains = 3, cores = 3, 
+                 thin = 10, 
+                 refresh = 0, 
+                 seed = 123, 
+                 control = list(adapt_delta = 0.99),
+                 backend = "cmdstan") 
+
+LCPUFA.brm1 |> conditional_effects("treatment") |> plot(points = TRUE)  
+#OK
+```
+
+####With data 
+```{r}
+#| label: 2_PUFA
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+
+LCPUFA.brm2 <- LCPUFA.brm1 |> update(sample_prior = "yes",
+                                       refresh = 0, 
+                                       iter = 7500,
+                                       warmup = 2500,
+                                       seed = 123) 
+
+LCPUFA.brm2 |> conditional_effects("treatment") |> plot(points = TRUE)
+
+save(LCPUFA.brm2, file = "../models/LCPUFA.brm2.RData")
+load("../models/LCPUFA.brm2.RData")
+```
+
+####MCMC sampling diagnostics
+```{r}
+#| label: 3_PUFA
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true 
+pars <- LCPUFA.brm2 |> get_variables()
+pars_2 <- str_extract(pars, '^b_.*|^shape*|^sd_.*|^sigma$') |> na.omit() 
+
+#Traceplots
+LCPUFA.brm2$fit |> stan_trace(pars = pars_2, inc_warmup = TRUE)
+#Autocorrelation
+LCPUFA.brm2$fit |> stan_ac(pars = pars_2) 
+#Rhat
+LCPUFA.brm2$fit |> stan_rhat()
+#ESS
+LCPUFA.brm2$fit |> stan_ess() 
+#Summary
+summary(LCPUFA.brm2) 
+```
+
+####Posterior probablity checks
+```{r}
+#| label: 4_PUFA
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+LCPUFA.brm2 |> pp_check(type = 'dens_overlay', ndraws = 200) + theme_classic()
+#OK
+```
+
+
+####DHARMA residuals
+```{r}
+#| label: 5_PUFA
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+coral.resids <- make_brms_dharma_res(LCPUFA.brm2, integerResponse = FALSE)
+
+wrap_elements(~testUniformity(coral.resids)) + 
+  wrap_elements(~plotResiduals(coral.resids, quantreg = FALSE)) +
+  wrap_elements(~testDispersion(coral.resids))
+
+#OK
+```
+
+####Means
+```{r}
+#| label: 6_PUFA
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+load("../models/LCPUFA.brm2.RData")
+
+LCPUFA.means <- LCPUFA.brm2 |> 
+  emmeans(~treatment, type = 'response') |> 
+  as.data.frame() |> 
+  mutate(response = response, 
+         lower.HPD = lower.HPD, 
+         upper.HPD = upper.HPD) 
+
+ggplot(data = LCPUFA.means, aes(x=factor(treatment, levels = level_order_new), y = response, colour = treatment)) + 
+  geom_point(data = coral_FA_sum, aes(x = factor(treatment, levels = level_order_new), y = LC_n3n6), colour = "black", alpha = 0.5, size = 0.5, position = position_jitter(w = 0.1, h = 0))+
+  geom_pointrange(aes(ymin = lower.HPD, ymax = upper.HPD), fatten = 5) + 
+  theme_classic() +
+  theme(legend.position = "none", 
+        text = element_text(size=15, colour = "black"),
+        axis.text.y = element_text(colour = "black"), 
+        axis.text.x = element_text(colour = "black")) +
+  scale_x_discrete(labels = level_order_new, 
+                   expression(Treatment), 
+                   breaks = waiver()) + 
+  scale_y_continuous(expression(LC-PUFA~n3:n6~ratio), 
+                     limits = c(0, 3))+ 
+    scale_colour_manual(values=group.colors)
+```
+
+####Pairwise comparisons
+```{r}
+#| label: 7_PUFA
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+(LCPUFA.means)
+
+sTreat <- LCPUFA.brm2$data |> pull(treatment) |> levels()
+STreat <- rep(1, length(sTreat))
+names(STreat) <- sTreat
+ 
+LCPUFA.brm2 |> emmeans(~treatment) |> 
+  gather_emmeans_draws() |>  
+  dplyr::mutate(.value = exp(.value)) |> 
+  ungroup() |>
+  dplyr::group_by(.draw) |> 
+  reframe(fit = data.frame(contrast = rownames(multcomp::contrMat(n = STreat, type = "Tukey")), 
+                           fit = t(as.vector(.value) %*% t(multcomp::contrMat(n = STreat, type = "Tukey"))))) |> 
+  unnest(fit) |> 
+  dplyr::group_by(contrast) |> 
+  dplyr::summarise(median_hdci(fit),
+            Pl = mean(fit<0),
+            Pg = mean(fit>0)) 
+#absolute difference between the treatments
+```
+
+#PUFA_n3_6 ratio
+####Priors model
+```{r}
+#| label: 1_PUFA_n36
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+PUFA_36_form <- bf(PUFA_n3_n6 ~ treatment + (1|tank_rand:genotype), family = Gamma(link = log), shape ~ treatment) 
+
+coral_FA_sum |> dplyr::group_by(treatment) |> dplyr::summarise(log(median((PUFA_n3_n6))), log(mad((PUFA_n3_n6)))) 
+
+PUFA_36_priors <- prior(normal(0.6, 1), class = 'Intercept') + 
+  prior(normal(0, 0.6), class = 'b') + 
+  prior(student_t(3, 0, 1), class = 'sd') + 
+  prior(normal(0, 0.6), class = 'b', dpar = 'shape')
+
+PUFA.brm1 <- brm(PUFA_36_form, 
+                 data = coral_FA_sum,
+                 prior = PUFA_36_priors, 
+                 sample_prior = 'only',
+                 iter = 5000, 
+                 warmup = 2500, 
+                 chains = 3, cores = 3, 
+                 thin = 10, 
+                 refresh = 0, 
+                 seed = 123, 
+                 control = list(adapt_delta = 0.99),
+                 backend = "cmdstan") 
+
+PUFA.brm1 |> conditional_effects("treatment") |> plot(points = TRUE)  
+
+#OK
+```
+
+####With data 
+```{r}
+#| label: 2_PUFA_n36
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+
+PUFA_m36.brm2 <- PUFA.brm1 |> update(sample_prior = "yes",
+                                       refresh = 0, 
+                                       iter = 7500,
+                                       warmup = 2500,
+                                       chains = 3, cores = 3, 
+                                       seed = 123) 
+
+PUFA_m36.brm2 |> conditional_effects("treatment") |> plot(points = TRUE)
+
+save(PUFA_m36.brm2, file = "../models/PUFA_m36.brm2.RData")
+load("../models/PUFA_m36.brm2.RData")
+```
+
+####MCMC sampling diagnostics
+```{r}
+#| label: 3_PUFA_n36
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true 
+pars <- PUFA_m36.brm2 |> get_variables()
+pars_2 <- str_extract(pars, '^b_.*|^shape*|^sd_.*|^sigma$') |> na.omit() 
+
+#Traceplots
+PUFA_m36.brm2$fit |> stan_trace(pars = pars_2, inc_warmup = TRUE)
+#Autocorrelation
+PUFA_m36.brm2$fit |> stan_ac(pars = pars_2) 
+#Rhat
+PUFA_m36.brm2$fit |> stan_rhat()
+#ESS
+PUFA_m36.brm2$fit |> stan_ess() 
+#Summary
+summary(PUFA_m36.brm2) 
+```
+
+####Posterior probablity checks
+```{r}
+#| label: 4_PUFA_n36
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+PUFA_m36.brm2 |> pp_check(type = 'dens_overlay', ndraws = 200) + theme_classic()
+#OK
+```
+
+
+####DHARMA residuals
+```{r}
+#| label: 5_PUFA_n36
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+coral.resids <- make_brms_dharma_res(PUFA_m36.brm2, integerResponse = FALSE)
+
+wrap_elements(~testUniformity(coral.resids)) + 
+  wrap_elements(~plotResiduals(coral.resids, quantreg = FALSE)) +
+  wrap_elements(~testDispersion(coral.resids))
+
+#OK
+```
+
+####Means
+```{r}
+#| label: 6_PUFA_n36
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+load("../models/PUFA_m36.brm2.RData")
+
+PUFAn36.means <- PUFA_m36.brm2 |> 
+  emmeans(~treatment, type = 'response') |> 
+  as.data.frame() |> 
+  mutate(response = response, 
+         lower.HPD = lower.HPD, 
+         upper.HPD = upper.HPD) 
+
+ggplot(data = PUFAn36.means, aes(x=factor(treatment, levels = level_order_new), y = response, colour = treatment)) + 
+  geom_point(data = coral_FA_sum, aes(x = factor(treatment, levels = level_order_new), y = PUFA_n3_n6), colour = "black", alpha = 0.5, size = 0.5, position = position_jitter(w = 0.1, h = 0))+
+  geom_pointrange(aes(ymin = lower.HPD, ymax = upper.HPD), fatten = 5) + 
+  theme_classic() +
+  theme(legend.position = "none", 
+        text = element_text(size=15, colour = "black"),
+        axis.text.y = element_text(colour = "black"), 
+        axis.text.x = element_text(colour = "black")) +
+  scale_x_discrete(labels = level_order_new, 
+                   expression(Treatment), 
+                   breaks = waiver()) + 
+  scale_y_continuous(expression(LC-PUFA~n3:n6~ratio), 
+                     limits = c(0, 3))+ 
+    scale_colour_manual(values=group.colors)
+
+```
+
+####Pairwise comparisons
+```{r}
+#| label: 7_PUFA_n36
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+(PUFAn36.means)
+
+sTreat <- PUFA_m36.brm2$data |> pull(treatment) |> levels()
+STreat <- rep(1, length(sTreat))
+names(STreat) <- sTreat
+ 
+PUFA_m36.brm2 |> emmeans(~treatment) |> 
+  gather_emmeans_draws() |>  
+  dplyr::mutate(.value = exp(.value)) |> 
+  ungroup() |>
+  dplyr::group_by(.draw) |> 
+  reframe(fit = data.frame(contrast = rownames(multcomp::contrMat(n = STreat, type = "Tukey")), 
+                           fit = t(as.vector(.value) %*% t(multcomp::contrMat(n = STreat, type = "Tukey"))))) |> 
+  unnest(fit) |> 
+  dplyr::group_by(contrast) |> 
+  dplyr::summarise(median_hdci(fit),
+            Pl = mean(fit<0),
+            Pg = mean(fit>0)) 
+#absolute difference between the treatments
+```
+
+
+#SFA
+####Priors model
+```{r}
+#| label: 1_SFA
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+SFA_form <- bf(SFA ~ treatment + (1|tank_rand:genotype), family = gaussian()) 
+
+coral_FA_sum |> group_by(treatment) |> summarise(median((SFA)), mad((SFA))) 
+
+SFA_priors <- prior(normal(55.3, 6), class = 'Intercept') + 
+  prior(normal(0, 20), class = 'b') + 
+  prior(student_t(3, 0, 6), class = 'sd') + 
+  prior(student_t(3, 0, 6), class = 'sigma') 
+
+SFA.brm1 <- brm(SFA_form, 
+                 data = coral_FA_sum,
+                 prior = SFA_priors, 
+                 sample_prior = 'only',
+                 iter = 5000, 
+                 warmup = 2500, 
+                 chains = 3, cores = 3, 
+                 thin = 10, 
+                 refresh = 0, 
+                 seed = 123, 
+                 control = list(adapt_delta = 0.99),
+                 backend = "cmdstan") 
+
+SFA.brm1 |> conditional_effects("treatment") |> plot(points = TRUE)   
+#OK
+```
+
+####With data 
+```{r}
+#| label: 2_SFA
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+
+SFA.brm2 <- SFA.brm1 |> update(sample_prior = "yes",
+                                       refresh = 0, 
+                                       iter = 7500,
+                                       warmup = 2500,
+                                       seed = 123) 
+
+SFA.brm2 |> conditional_effects("treatment") |> plot(points = TRUE)
+
+save(SFA.brm2, file = "../models/SFA.brm2.RData")
+load("../models/SFA.brm2.RData")
+```
+
+####MCMC sampling diagnostics
+```{r}
+#| label: 3_SFA
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true 
+pars <- SFA.brm2 |> get_variables()
+pars_2 <- str_extract(pars, '^b_.*|^shape*|^sd_.*|^sigma$') |> na.omit() 
+
+#Traceplots
+SFA.brm2$fit |> stan_trace(pars = pars_2, inc_warmup = TRUE)
+#Autocorrelation
+SFA.brm2$fit |> stan_ac(pars = pars_2) 
+#Rhat
+SFA.brm2$fit |> stan_rhat()
+#ESS
+SFA.brm2$fit |> stan_ess() 
+#Summary
+summary(SFA.brm2) 
+```
+
+####Posterior probablity checks
+```{r}
+#| label: 4_SFA
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+SFA.brm2 |> pp_check(type = 'dens_overlay', ndraws = 200) + theme_classic()
+#OK
+```
+
+
+####DHARMA residuals
+```{r}
+#| label: 5_SFA
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+coral.resids <- make_brms_dharma_res(SFA.brm2, integerResponse = FALSE)
+
+wrap_elements(~testUniformity(coral.resids)) + 
+  wrap_elements(~plotResiduals(coral.resids, quantreg = FALSE)) +
+  wrap_elements(~testDispersion(coral.resids))
+#OK
+```
+
+####Means
+```{r}
+#| label: 6_SFA
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+load("../models/SFA.brm2.RData")
+
+SFA.means_mgg <- SFA.brm2 |> 
+  emmeans(~treatment, type = 'response') |> 
+  as.data.frame() |> 
+  mutate(emmean = 10*emmean, 
+         lower.HPD = 10*lower.HPD, 
+         upper.HPD = 10*upper.HPD) 
+SFA.means_mgg
+
+ggplot(data = SFA.means_mgg, aes(x=factor(treatment, levels = level_order_new), y = emmean, colour = treatment)) + 
+  geom_point(data = coral_FA_sum, aes(x = factor(treatment, levels = level_order_new), y = 10*SFA), colour = "black", alpha = 0.5, size = 0.5, position = position_jitter(w = 0.1, h = 0))+
+  geom_pointrange(aes(ymin = lower.HPD, ymax = upper.HPD), fatten = 5) + 
+  theme_classic() +
+  theme(legend.position = "none", 
+        text = element_text(size=15, colour = "black"),
+        axis.text.y = element_text(colour = "black"), 
+        axis.text.x = element_text(colour = "black")) +
+  scale_x_discrete(labels = level_order_new, 
+                   expression(Treatment), 
+                   breaks = waiver()) + 
+  scale_y_continuous(expression(SFA~(mg~g^-1~FA)), 
+                     limits = c(300, 700))+ 
+    scale_colour_manual(values=group.colors)
+
+```
+
+####Pairwise comparisons
+```{r}
+#| label: 7_SFA
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+sTreat <- SFA.brm2$data |> pull(treatment) |> levels()
+STreat <- rep(1, length(sTreat))
+names(STreat) <- sTreat
+
+SFA.brm2 |> emmeans(~treatment) |> 
+  gather_emmeans_draws() |>  
+  mutate(.value = (.value)) |> 
+  ungroup() |>
+  dplyr::group_by(.draw) |> 
+  reframe(fit = data.frame(contrast = rownames(multcomp::contrMat(n = STreat, type = "Tukey")), 
+                           fit = t(as.vector(.value) %*% t(multcomp::contrMat(n = STreat, type = "Tukey"))))) |> 
+  unnest(fit) |> 
+  dplyr::group_by(contrast) |> 
+  dplyr::summarise(median_hdci(fit),
+            Pl = mean(fit<0),
+            Pg = mean(fit>0)) 
+#absolute difference between the treatments
+```
+
+#MUFA
+####Priors model
+```{r}
+#| label: 1_MUFA
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+
+MUFA_form <- bf(MUFA ~ treatment + (1|tank_rand:genotype), family = Gamma(link = 'log'), shape ~ treatment) 
+
+coral_FA_sum |> dplyr::group_by(treatment) |> dplyr::summarise(median(log(MUFA)), mad(log(MUFA))) 
+
+get_prior(MUFA_form, data = coral_FA_sum)
+
+MUFA_priors_log <- prior(normal(1.1, 0.2), class = 'Intercept') + 
+  prior(normal(0, 1), class = 'b') + 
+  prior(student_t(3, 0, 0.2), class = 'sd') + 
+  prior(normal(0, 1), class = 'b', dpar = 'shape')
+
+MUFA.brm1 <- brm(MUFA_form, 
+                 data = coral_FA_sum,
+                 prior = MUFA_priors_log, 
+                 sample_prior = 'only',
+                 iter = 5000, 
+                 warmup = 2500, 
+                 chains = 3, cores = 3, 
+                 thin = 10, 
+                 refresh = 0, 
+                 seed = 123, 
+                 control = list(adapt_delta = 0.99),
+                 backend = "cmdstan") 
+
+MUFA.brm1 |> conditional_effects("treatment") |> plot(points = TRUE)   
+#OK
+```
+
+####With data 
+```{r}
+#| label: 2_MFA
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+
+MUFA.brm2 <- MUFA.brm1 |> update(sample_prior = "yes",
+                                       refresh = 0, 
+                                       iter = 7500,
+                                       warmup = 2500,
+                                       seed = 123) 
+
+MUFA.brm2 |> conditional_effects("treatment") |> plot(points = TRUE)
+
+save(MUFA.brm2, file = "../models/MUFA.brm2.RData")
+load("../models/MUFA.brm2.RData")
+```
+
+####MCMC sampling diagnostics
+```{r}
+#| label: 3_MUFA
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true 
+pars <- MUFA.brm2 |> get_variables()
+pars_2 <- str_extract(pars, '^b_.*|^shape*|^sd_.*|^sigma$') |> na.omit() 
+
+#Traceplots
+MUFA.brm2$fit |> stan_trace(pars = pars_2, inc_warmup = TRUE)
+#Autocorrelation
+MUFA.brm2$fit |> stan_ac(pars = pars_2) 
+#Rhat
+MUFA.brm2$fit |> stan_rhat()
+#ESS
+MUFA.brm2$fit |> stan_ess() 
+#Summary
+summary(MUFA.brm2) 
+```
+
+####Posterior probablity checks
+```{r}
+#| label: 4_MUFA
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+MUFA.brm2 |> pp_check(type = 'dens_overlay', ndraws = 200) + theme_classic()
+#OK
+```
+
+
+####DHARMA residuals
+```{r}
+#| label: 5_MUFA
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+coral.resids <- make_brms_dharma_res(MUFA.brm2, integerResponse = FALSE)
+
+wrap_elements(~testUniformity(coral.resids)) + 
+  wrap_elements(~plotResiduals(coral.resids, quantreg = FALSE)) +
+  wrap_elements(~testDispersion(coral.resids))
+#OK
+```
+
+####Means
+```{r}
+#| label: 6_MUFA
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+load("../models/MUFA.brm2.RData")
+
+MUFA.means_mgg <- MUFA.brm2 |> 
+  emmeans(~treatment, type = 'response') |> 
+  as.data.frame() |> 
+  mutate(response = 10*response, 
+         lower.HPD = 10*lower.HPD, 
+         upper.HPD = 10*upper.HPD) 
+MUFA.means_mgg
+
+ggplot(data = MUFA.means_mgg, aes(x=factor(treatment, levels = level_order_new), y = response, colour = treatment)) + 
+  geom_point(data = coral_FA_sum, aes(x = factor(treatment, levels = level_order_new), y = 10*MUFA), colour = "black", alpha = 0.5, size = 0.5, position = position_jitter(w = 0.1, h = 0))+
+  geom_pointrange(aes(ymin = lower.HPD, ymax = upper.HPD), fatten = 5) + 
+  theme_classic() +
+  theme(legend.position = "none", 
+        text = element_text(size=15, colour = "black"),
+        axis.text.y = element_text(colour = "black"), 
+        axis.text.x = element_text(colour = "black")) +
+  scale_x_discrete(labels = level_order_new, 
+                   expression(Treatment), 
+                   breaks = waiver()) + 
+  scale_y_continuous(expression(MUFA~(mg~g^-1~FA)), 
+                     limits = c(20, 80), 
+                     breaks = c(seq(20, 80, by = 10)))+ 
+    scale_colour_manual(values=group.colors)
+```
+
+####Pairwise comparisons
+```{r}
+#| label: 7_MUFA
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+sTreat <- MUFA.brm2$data |> pull(treatment) |> levels()
+STreat <- rep(1, length(sTreat))
+names(STreat) <- sTreat
+
+MUFA.brm2 |> emmeans(~treatment) |> 
+  gather_emmeans_draws() |>  
+  mutate(.value = exp(.value)) |> 
+  ungroup() |>
+  dplyr::group_by(.draw) |> 
+  reframe(fit = data.frame(contrast = rownames(multcomp::contrMat(n = STreat, type = "Tukey")), 
+                           fit = t(as.vector(.value) %*% t(multcomp::contrMat(n = STreat, type = "Tukey"))))) |> 
+  unnest(fit) |> 
+  dplyr::group_by(contrast) |> 
+  dplyr::summarise(median_hdci(fit),
+            Pl = mean(fit<0),
+            Pg = mean(fit>0)) 
+#absolute difference between the treatments
+```
+
+#Summary overall
+```{r}
+#| label: summary
+diets_FA_comb <- cbind(diets_FA, diets_FA_var)
+
+diets_FA_comb_sum_sd <- diets_FA_comb |> group_by(treatment) |>
+  dplyr::summarise(across(where(is.numeric), list(mean=mean, sd=sd),na.rm=TRUE)) |> 
+  as.data.frame()  
+```

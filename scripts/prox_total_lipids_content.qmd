@@ -1,0 +1,282 @@
+---
+title: "fcn_protein"
+format: html
+editor: source
+---
+
+# Preparations
+
+Load the necessary libraries
+
+```{r Preperations}
+#| label: libraries
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: false
+
+library(tidyverse) #for data wrangling
+library(cmdstanr)   #for cmdstan
+library(brms)       #for fitting models in STAN
+library(standist)   #for visualizing distributions
+library(HDInterval) #for HPD intervals
+library(posterior)  #for posterior draws
+library(coda)       #for diagnostics
+library(bayesplot)  #for diagnostics
+library(ggmcmc)     #for MCMC diagnostics
+library(rstan)      #for interfacing with STAN
+library(effects)   #for partial effects plots
+library(car)       #for regression diagnostics
+library(broom)     #for tidy output
+library(ggfortify) #for model diagnostics
+library(sjPlot)    #for outputs
+library(knitr)     #for kable
+library(emmeans)   #for estimating marginal means
+library(MASS)      #for glm.nb
+library(MuMIn)     #for AICc
+library(tidybayes)
+library(broom.mixed)#for tidying MCMC outputs
+library(patchwork)  #for multiple plots
+library(ggeffects)
+library(DHARMa)
+library(ggridges)
+library(bayestestR) #for ROPE
+library(see)        #for some plots
+library(easystats)     #framework for stats, modelling and visualisation 
+library(dplyr)
+source('../helperFunctions.R')  
+
+load("../models/c.tlipid.brm4.RData") #load model
+```
+
+#Read in data
+```{r readData}
+#| label: read data
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: false
+prox <- read_csv('../data/corals_prox_full.csv', trim_ws = TRUE)
+
+prox <- prox |> mutate(treatment = factor(treatment),
+                       tank_rep_rand = factor(tank_rep_rand), 
+                       genotype = factor(genotype), 
+                       fragment = factor(fragment), 
+                       ash_DW_mgg = as.numeric(ash_DW_mgg),
+                       organic_DW_mgg = as.numeric(organic_DW_mgg),
+                       lipid_DW_mgg = as.numeric(lipid_DW_mgg),
+                       lipid_AFDW_mgg = as.numeric(lipid_AFDW_mgg), 
+                       protien_DW_per = as.numeric(protien_DW_per), 
+                       protein_AFDW_mgg = as.numeric(protein_AFDW_mgg))  
+
+prox <- prox |> dplyr::filter(rep==0) |> droplevels() 
+
+coral_treats <- c('Control', 'Dissolved', 'Field', 'Fish', 'LiveFeeds', 'Mix', 'Pellets', 'SeaSim')
+prox.coral <- prox |> dplyr::filter(treatment %in% coral_treats) |> droplevels() 
+
+diets <- c('Algae', 'Artemia', 'PelletD', 'Rotifers')
+prox.diets <- prox |> dplyr::filter(treatment %in% diets) |> droplevels() 
+```
+
+#Visualisation
+```{r}
+#| label: Visualisation_set-up
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+group.colors <- c(Control = "#999999", Dissolved = "#E69F00", Fish = "#56B4E9", LiveFeeds = "#009E73", Mix = "#F0E442", Pellets = "#0072B2", Field = "#D55E00", SeaSim = "#CC79A7" )
+
+level_order_microbe_new <- c('Field', 'SeaSim', 'Control','Pellets', 'LiveFeeds', 'Mix', 'Fish', 'Dissolved')
+level_names_microbe_new <- c('Field', 'Post - acclimation', 'Control','Pellets', 'LiveFeeds', 'LiveFeeds + Fish', 'Fish', 'Dissolved') 
+```
+
+## Fit the model
+###Treatment + tank:genotype random model
+####Priors model
+```{r}
+#| label: geno_rand_model_1
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+
+c.tlipid.form2 <- bf(lipid_AFDW_mgg ~ treatment + (1|tank_rep_rand:genotype), family = Gamma(link = "log")) 
+
+prox.coral |> group_by(treatment) |> summarise(median(log(lipid_AFDW_mgg)), mad(log(lipid_AFDW_mgg))) 
+
+priors <- prior(normal(4.5, 0.3), class = 'Intercept') + 
+  prior(normal(0, 1.5), class = 'b') + 
+  prior(student_t(3, 0, 0.3), class = 'sd') + 
+  prior(gamma(2, 1), class = 'shape')
+
+c.tlipid.brm3 <- brm(c.tlipid.form2, 
+                 data = prox.coral,
+                 prior = priors, 
+                 sample_prior = 'only',
+                 iter = 5000, 
+                 warmup = 2500, 
+                 chains = 3, cores = 3, 
+                 thin = 10, 
+                 refresh = 0, 
+                 seed = 123, 
+                 control = list(adapt_delta = 0.99),
+                 backend = "cmdstan") 
+
+c.tlipid.brm3 |> conditional_effects("treatment") |> plot(points = TRUE)   
+```
+
+####With data 
+```{r}
+#| label: geno_rand_model_2
+#| output: true
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true
+c.tlipid.brm4 <- c.tlipid.brm3 |> update(sample_prior = "yes",
+                                       refresh = 0, 
+                                       iter = 7500,
+                                       warmup = 2500,
+                                       seed = 123) 
+
+c.tlipid.brm4 |> conditional_effects("treatment") |> plot(points = TRUE)
+
+save(c.tlipid.brm4, file = "../models/c.tlipid.brm4.RData")
+load("../models/c.tlipid.brm4.RData")
+```
+
+####MCMC sampling diagnostics
+```{r}
+#| label: geno_rand_model_3
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: true 
+pars <- c.tlipid.brm4 |> get_variables()
+pars_2 <- str_extract(pars, '^b_.*|^shape*|^sd_.*|^sigma$') |> na.omit() 
+
+#Traceplots
+c.tlipid.brm4$fit |> stan_trace(pars = pars_2, inc_warmup = TRUE)
+
+#Autocorrelation
+c.tlipid.brm4$fit |> stan_ac(pars = pars_2) 
+
+#Rhat
+c.tlipid.brm4$fit |> stan_rhat()
+
+#ESS
+c.tlipid.brm4$fit |> stan_ess() 
+
+summary(c.tlipid.brm4) 
+```
+
+####Posterior probablity checks
+```{r}
+#| label: geno_rand_model_4
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+c.tlipid.brm4 |> pp_check(type = 'dens_overlay', ndraws = 200) + theme_classic()
+#OK
+```
+
+
+####DHARMA residuals
+```{r}
+#| label: geno_rand_model_5
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+coral.resids <- make_brms_dharma_res(c.tlipid.brm4, integerResponse = FALSE)
+
+wrap_elements(~testUniformity(coral.resids)) + 
+  wrap_elements(~plotResiduals(coral.resids, quantreg = FALSE)) +
+  wrap_elements(~testDispersion(coral.resids))
+#Good
+```
+
+
+####Model investigations 
+#####Means plot
+```{r}
+#| label: model_investigations_3
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+load("../models/c.tlipid.brm4.RData")
+
+tlipid.means <- c.tlipid.brm4 |> 
+  emmeans(~treatment, type = 'response') |> 
+  as.data.frame()
+
+#make plot that displays mean and HDCI
+pver_TL_plot_noraw <-  ggplot(data = tlipid.means, aes(x=factor(treatment, level = level_order_microbe_new), y = response, colour = treatment)) + 
+    geom_pointrange(aes(ymin = lower.HPD, ymax = upper.HPD), fatten = 6) + 
+  theme_classic() +
+  theme(legend.position = "none", 
+        text = element_text(size=15, colour = "black"),
+        axis.text.y = element_text(colour = "black"), 
+        axis.text.x = element_text(angle = 45, 
+                                  vjust =1, 
+                                   hjust = 1,
+                                   colour = "black")) +
+    scale_x_discrete(expression(""), 
+                   breaks = waiver(), 
+                   labels = stringr::str_wrap(level_names_microbe_new, 9)) + 
+  scale_y_continuous(expression(Total~Lipid~(mg~g^-1~AFDW)), limits = c(0, 250), breaks = seq(0, 600, by = 50))+ 
+    scale_colour_manual(values=group.colors)
+
+pver_TL_plot_noraw
+```
+
+#####Pairwise comparisons
+
+```{r}
+#| label: model_investigations_pairwise
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+sTreat <- c.tlipid.brm4$data |> pull(treatment) |> levels()
+STreat <- rep(1, length(sTreat))
+names(STreat) <- sTreat
+c.tlipid.brm4 |> emmeans(~treatment) |> 
+  gather_emmeans_draws() |>  
+  mutate(.value = exp(.value)) |> 
+  filter(.draw == 1) |> pull(.value) -> x
+x %*% t(multcomp::contrMat(n = STreat, type = "Tukey"))
+
+
+c.tlipid.brm4 |> emmeans(~treatment) |> 
+  gather_emmeans_draws() |>  
+  dplyr::mutate(.value = exp(.value)) |> 
+  #filter(.draw == 1, month == 1) |> 
+  ungroup() |>
+  dplyr::group_by(.draw) |> 
+  reframe(fit = data.frame(contrast = rownames(multcomp::contrMat(n = STreat, type = "Tukey")), 
+                           fit = t(as.vector(.value) %*% t(multcomp::contrMat(n = STreat, type = "Tukey"))))) |> 
+  unnest(fit) |> 
+  dplyr::group_by(contrast) |> 
+  dplyr::summarise(median_hdci(fit),
+            Pl = mean(fit<0),
+            Pg = mean(fit>0)) 
+#absolute difference between the treatments within different months
+```
+

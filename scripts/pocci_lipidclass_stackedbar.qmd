@@ -1,0 +1,146 @@
+---
+title: "fcn_TLC_visualistation"
+format: html
+editor: source
+---
+
+# Preparations
+
+```{r Preperations}
+#| label: libraries
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: false
+
+library(tidyverse) #for data wrangling
+library(cmdstanr)   #for cmdstan
+library(brms)       #for fitting models in STAN
+library(standist)   #for visualizing distributions
+library(HDInterval) #for HPD intervals
+library(posterior)  #for posterior draws
+library(coda)       #for diagnostics
+library(bayesplot)  #for diagnostics
+library(ggmcmc)     #for MCMC diagnostics
+library(rstan)      #for interfacing with STAN
+library(effects)   #for partial effects plots
+library(car)       #for regression diagnostics
+library(broom)     #for tidy output
+library(ggfortify) #for model diagnostics
+library(sjPlot)    #for outputs
+library(knitr)     #for kable
+library(emmeans)   #for estimating marginal means
+library(MASS)      #for glm.nb
+library(MuMIn)     #for AICc
+library(tidybayes)
+library(broom.mixed)#for tidying MCMC outputs
+library(patchwork)  #for multiple plots
+library(ggeffects)
+library(DHARMa)
+library(ggridges)
+library(bayestestR) #for ROPE
+library(see)        #for some plots
+library(easystats)     #framework for stats, modelling and visualisation 
+library(dplyr)
+```
+
+#Read in data
+
+```{r}
+#| label: read_data
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+#| 
+TLC_stacked <- read_csv('../data/corals_TLC_means.csv', trim_ws = TRUE)
+
+TLC_stacked <- TLC_stacked |> mutate(treatment = factor(treatment),
+                       lipid_class = factor(lipid_class))   
+
+```
+
+#Visualisation set-up
+```{r}
+#| label: v_set-up
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+TLC.colours <- c(LPC= "#88CCEE", PC = "#CC6677", PSPI = "#DDCC77", PE = "#117733", AMPL = "#332288", STEROL = "#AA4499", 
+                             FFA = "#44AA99", DAG = "#999933", TAG = "#882255", SE = "#661100") 
+
+level_order_LC <- c('LPC','PC', 'PSPI', 'PE', 'AMPL',  'STEROL',  'DAG', 'FFA', 'TAG', 'SE')  
+level_order_LC_names <- c('LPC','PC', 'PSPI', 'PE', 'AMPL',  'STEROL',  '1,2 DAG', 'FFA', 'TAG', 'WE')  
+
+level_order_microbe_new <- c('Field', 'SeaSim', 'Control','Pellets', 'LiveFeeds', 'Mix', 'Fish', 'Dissolved')
+level_names_microbe_new <- c('Field', 'Post - acclimation', 'Control','Pellets', 'LiveFeeds', 'LiveFeeds + Fish', 'Fish', 'Dissolved') 
+```
+
+#Percentage plot
+```{r}
+
+bar_TCL_per <- 
+  TLC_stacked |> ggplot(aes(x=factor(treatment, levels = level_order_microbe_new), 
+                          y = mgg_TL*10, 
+                          colour = 'black', 
+                          fill = factor(lipid_class, levels = level_order_LC)))+ 
+  geom_bar(position = "stack", 
+           stat = "identity", 
+           width = 0.9) + 
+  scale_fill_manual(values=TLC.colours, 
+                    name = "Lipid Class", 
+                    labels = level_order_LC_names) +  
+  scale_colour_manual(values = 'black',
+                      guide = "none")+
+  theme_classic() +
+  theme(legend.position = "right", 
+        text = element_text(size=15, colour = "black"),
+        axis.text.y = element_text(colour = "black"), 
+        axis.text.x = element_text(angle = 45,
+                             vjust =1,
+                             hjust = 1, 
+                             colour = "black")) +
+  scale_x_discrete(labels = stringr::str_wrap(level_names_microbe_new, 9), 
+                   expression("")) + 
+  scale_y_continuous(expression(Porpotion~of~lipid~(mg~g^-1)), 
+                     limits = c(0,1001), 
+                     breaks = seq(0, 1001, by = 100))
+
+bar_TCL_per
+```
+
+#Total lipid fraction plot
+```{r}
+
+bar_TCL_abs <- TLC_stacked |> ggplot(aes(x=factor(treatment, levels = level_order_microbe_new), 
+                          y = abs_TL, 
+                          colour = "black",
+                          fill = factor(lipid_class, levels = level_order_LC)))+ 
+  geom_bar(position = "stack", 
+           stat = "identity", 
+           width = 0.9) + 
+  scale_fill_manual(values=TLC.colours) +  
+  scale_colour_manual(values = 'black', guide = "none")+
+  theme_classic() +  
+  guides(fill=guide_legend(title=""))+
+  theme(legend.position = "right",  
+        text = element_text(size=15, colour = "black"),
+        axis.text.y = element_text(colour = "black"), 
+        axis.text.x = element_text(angle = 45,
+                             vjust =1,
+                             hjust = 1, 
+                             colour = "black")) + 
+  scale_x_discrete(labels = stringr::str_wrap(level_names_microbe_new, 9), 
+                   expression("")) + 
+  scale_y_continuous(expression(Total~Lipid~(mg~g^-1~AFDW)), 
+                                limits = c(0, 200), 
+                                breaks = c(seq(0, 200, by = 50)))
+
+bar_TCL_abs
+
+```

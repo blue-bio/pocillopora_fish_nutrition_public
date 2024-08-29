@@ -1,0 +1,23 @@
+---
+title: "fcn_combine_plots"
+format: html
+editor: source
+---
+```{r}
+library(ggpubr) 
+```
+
+###Prox
+```{r}
+pver_ash_plot_noraw + pver_protein_KJ_plot_noraw + pver_TL_plot_noraw + plot_annotation(tag_levels = "a", tag_suffix = ")")
+```
+
+###FA 
+```{r}
+FA_PCA_plot_points + FA_PCA_plot_arrows_15_labeled + plot_annotation(tag_levels = "a", tag_suffix = ")") 
+``` 
+
+###diets
+```{r}
+diets_PCA + diet_TLC_pca + plot_annotation(tag_levels = "a", tag_suffix = ")") 
+``` 

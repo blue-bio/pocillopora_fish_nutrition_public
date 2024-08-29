@@ -1,0 +1,283 @@
+---
+title: "fcn_TLC_multivar"
+format: html
+editor: source
+---
+
+# Preparations
+```{r Preperations}
+#| label: libraries
+#| output: false
+#| eval: true
+#| warning: false
+#| message: false
+#| cache: false
+
+library(tidyverse) #for data wrangling
+library(cmdstanr)   #for cmdstan
+library(brms)       #for fitting models in STAN
+library(standist)   #for visualizing distributions
+library(HDInterval) #for HPD intervals
+library(posterior)  #for posterior draws
+library(coda)       #for diagnostics
+library(bayesplot)  #for diagnostics
+library(ggmcmc)     #for MCMC diagnostics
+library(rstan)      #for interfacing with STAN
+library(effects)   #for partial effects plots
+library(car)       #for regression diagnostics
+library(broom)     #for tidy output
+library(ggfortify) #for model diagnostics
+library(sjPlot)    #for outputs
+library(knitr)     #for kable
+library(emmeans)   #for estimating marginal means
+library(MASS)      #for glm.nb
+library(MuMIn)     #for AICc
+library(tidybayes)
+library(broom.mixed)#for tidying MCMC outputs
+library(patchwork)  #for multiple plots
+library(ggeffects)
+library(DHARMa)
+library(ggridges)
+library(bayestestR) #for ROPE
+library(see)        #for some plots
+library(easystats)     #framework for stats, modelling and visualisation 
+library(dplyr)
+library(factoextra)
+library(ggplot2)
+library(vegan)
+library(dplyr)
+library(indicspecies)
+library(plotly)
+library(plyr)
+library(factoextra)
+source('../helperFunctions.R')  
+source('../multivar_helperFunctions.R')  
+
+``` 
+
+#Read in data
+```{r} 
+#| label: read_data
+
+##Lipid class
+mv_data_TLC <- read_csv('../data/TLC_class_diets_multivar.csv', trim_ws = TRUE)
+coral_TLC_mv <- mv_data_TLC |> filter(row_number() <= 140) 
+diets_TLC_mv <- mv_data_TLC |> filter(row_number() >= 141)
+
+mv_var_TLC <- read_csv('../data/TLC_class_diets_multivar_var.csv', trim_ws = TRUE)
+mv_var_TLC <- mv_var_TLC |> mutate(treatment = factor(treatment),
+                       replicate = factor(replicate),  
+                       genotype = factor(genotype))  
+coral_TLC_mv_var <- mv_var_TLC |> filter(row_number() <= 140) |> droplevels()
+diets_TLC_mv_var <- mv_var_TLC |> filter(row_number() >= 141) |> droplevels()
+
+##Fatty Acid
+data_FA <- read_csv('../data/FA_data_rownames.csv', trim_ws = TRUE) 
+diets_FA <- data_FA |> filter(row_number() >= 141)
+
+var_FA <- read_csv('../data/FA_sample_info.csv', trim_ws = TRUE)  
+var_FA <- var_FA |> mutate(genotype = as.factor(genotype), 
+                           treatment = as.factor(treatment), 
+                           tank = as.factor(tank))
+diets_FA_var <- var_FA |> filter(row_number() >= 141) |> droplevels()
+
+data_FA_sum <- read_csv('../data/FA_data_sum.csv', trim_ws = TRUE) 
+data_FA_sum$tank_rand <- paste(data_FA_sum$treatment,data_FA_sum$tank)
+
+data_FA_sum <- data_FA_sum |> mutate(genotype = as.factor(genotype), 
+                           treatment = as.factor(treatment), 
+                           tank = as.factor(tank), 
+                           tank_rand = as.factor(tank_rand))
+diets_FA_sum <- data_FA_sum |> filter(row_number() >= 141)
+
+```
+
+##Visualisation set-up
+```{r}
+#| label: visualise
+#| output: true
+#| eval: true 
+#| warning: false
+#| message: false
+#| cache: true
+
+group.colors <- c(Control = "#999999", Dissolved = "#E69F00", Fish = "#56B4E9", LiveFeeds = "#009E73", Mix = "#F0E442", Pellets = "#0072B2", Field = "#D55E00", SeaSim = "#CC79A7" )
+
+level_order_new <- c('Control','Pellets', 'LiveFeeds', 'Dissolved', 'Fish',  'Mix',  'Field', 'SeaSim') 
+
+```
+
+
+#Lipid Class 
+##Summary
+```{r}
+diets_TLC_means <- diets_TLC |> 
+  group_by(treatment) |> 
+  dplyr::summarise(SE = mean(SE), 
+                   TAG = mean(TAG), 
+                   DAG = mean(DAG), 
+                   FFA = mean(FFA), 
+                   STEROL = mean(STEROL), 
+                   AMPL = mean(AMPL), 
+                   PE = mean(PE), 
+                   PSPI= mean(PSPI), 
+                   PC = mean(PC), 
+                   LPC = mean(LPC)) |> 
+  as.data.frame()
+
+diets_TLC_means
+```
+
+##Base plot
+```{r}
+#| label: PCA_diets
+diets_TLC_mv 
+which(apply(diets_TLC_mv, 2, var)==0) 
+
+
+diets_TLC_mv_data <- within(diets_TLC_mv, rm("DAG")) 
+
+diets_TLC_mv_data <- 
+  diets_TLC_mv_data |>  
+  dplyr::rename("WE" = SE)
+
+diets_TLC_mv_var <- transform(diets_TLC_mv_var,
+          treatment=revalue(treatment,c("Pellets_D"="Fish pellets")))
+
+diet.TLC.pca <- prcomp(diets_TLC_mv_data, scale = TRUE)
+
+diet_TLC_pca <- fviz_pca_biplot(diet.TLC.pca,
+                habillage = diets_TLC_mv_var$treatment,
+                addEllipses = TRUE,
+                palette = "Set2",
+                ellipse.type = "confidence",
+                legend.title = "Diet",
+                repel = TRUE, 
+                col.var = "#6B6665",
+                select.var = list(contrib = 9),
+                label = c("var"), 
+                title = " ")+ 
+  theme_minimal() + 
+  theme(legend.position = "bottom",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.text.x = element_text(size = 14, colour = "black"), 
+        axis.text.y = element_text(size = 14, colour = "black"), 
+        axis.title.y = element_text(size = 16, colour = "black"), 
+        panel.border = element_rect(colour = 'black', fill = NA),
+        plot.background=element_blank())  
+diet_TLC_pca
+```
+
+##FA arrows
+```{r}
+#| label: PCA_arrows
+fviz_pca_biplot(diet.pca,
+                invisible ="ind",
+                repel = TRUE, 
+                col.var = "contrib",
+                select.var = list(contrib = 20),
+                label = c("var"), 
+                title = " ") + 
+  theme_minimal() +
+  scale_color_gradient2(low="black", 
+                        mid="blue",
+                        high="red", 
+                        midpoint=3.5) +
+  theme(legend.position = "bottom",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = 'black', fill = NA),
+        plot.background=element_blank())
+```
+
+
+#Fatty acids
+##Indicator species
+```{r}
+#| label: Indic_FA
+diets_treatment = diets_FA_var$treatment
+diets_FA_idsp <- multipatt(diets_FA, diets_treatment, func = "r.g", control = how(nperm=9999))
+save(diets_FA_idsp, file = "../models/diets_FA_idsp.RData")
+
+load("../models/diets_FA_idsp.RData")
+summary(diets_FA_idsp) 
+```
+
+##Base plot
+```{r}
+#| label: PCA_diets
+diets_FA 
+which(apply(diets_FA, 2, var)==0) 
+
+diets_FA_pdata <- within(diets_FA, rm("10:00", "11:00", "20:3n-3")) 
+
+diets_FA_pdata <- 
+  diets_FA_pdata |>  
+  dplyr::rename("21:0" = `21:00`, 
+                "17:0" = `17:00`, 
+                "Unknown 4" = `UNK4`) 
+
+diet.pca <- prcomp(diets_FA_pdata, scale = TRUE)
+
+diets_PCA <- 
+fviz_pca_biplot(diet.pca,
+                habillage = diets_FA_var$treatment,
+                addEllipses = TRUE,
+                palette = "Set2",
+                ellipse.type = "confidence",
+                legend.title = "Diet",
+                repel = TRUE, 
+                col.var = "#6B6665",
+                select.var = list(contrib = 20),
+                label = c("var"), 
+                title = " ") + 
+  theme_minimal() + 
+  scale_y_continuous(limits = c(-6, 6), breaks = c(seq(-6,6,3))) +
+  scale_x_continuous(limits = c(-6, 7), breaks = c(seq(-6,6,3))) +
+  theme(legend.position = "bottom",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.text.x = element_text(size = 14, colour = "black"), 
+        axis.text.y = element_text(size = 14, colour = "black"), 
+        axis.title.y = element_text(size = 16, colour = "black"), 
+        panel.border = element_rect(colour = 'black', fill = NA),
+        plot.background=element_blank())  
+diets_PCA
+```
+
+##FA arrows
+```{r}
+#| label: PCA_arrows
+fviz_pca_biplot(diet.pca,
+                invisible ="ind",
+                repel = TRUE, 
+                col.var = "contrib",
+                select.var = list(contrib = 20),
+                label = c("var"), 
+                title = " ") + 
+  theme_minimal() +
+  scale_color_gradient2(low="black", 
+                        mid="blue",
+                        high="red", 
+                        midpoint=3.5) +
+  theme(legend.position = "bottom",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = 'black', fill = NA),
+        plot.background=element_blank())
+```
+
+##PUFA 
+```{r}
+diets_FA_sum |> 
+  dplyr::group_by(treatment) |> 
+  dplyr::summarise(mean(PUFA), 
+                   mean(LC_PUFA_n3), 
+                   mean(LC_PUFA_n6))
+```
+
