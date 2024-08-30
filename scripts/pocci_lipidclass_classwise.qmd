@@ -56,14 +56,12 @@ data_TLC <- data_TLC |> mutate(treatment = factor(treatment),
                        replicate = factor(replicate),  
                        tank_rep_rand = factor(tank_rep_rand),  
                        genotype = factor(genotype), 
-                       DAG = `12DAG`, 
-                       SS = Storage/Structural)  
+                       DAG = `12DAG`) 
 
 data_TLC_new <- data_TLC |> 
   dplyr::mutate(Storage_new = SE+TAG+DAG+FFA) |> 
-  dplyr::mutate(Structural_new = 100 - Storage_new) |> 
-  dplyr::mutate(Store_TL_new = lipid_AFDW_mgg*(Storage_new/100), 
-                Struct_TL_new = lipid_AFDW_mgg*(Structural_new/100))
+  dplyr::mutate(Structural_new = 100 - Storage_new, 
+                TL_TAG = (TAG/100)*lipid_AFDW_mgg)
 
 coral_treats <- c('Control', 'Dissolved', 'Field', 'Fish', 'LiveFeeds', 'Mix', 'Pellets', 'SeaSim')
 coral_TLC <- data_TLC_new |> dplyr::filter(treatment %in% coral_treats) |> droplevels() 
@@ -71,7 +69,8 @@ coral_TLC <- data_TLC_new |> dplyr::filter(treatment %in% coral_treats) |> dropl
 diets_treats <- c('Algae', 'Artemia', 'Pellets_D', 'Rotifers')
 diets_TLC <- data_TLC_new |> dplyr::filter(treatment %in% diets_treats) |> droplevels() 
 
-treatments_only <- c('Control', 'Dissolved', 'Fish', 'LiveFeeds', 'Mix', 'Pellets')
+treatments_only <- c('Control', 'Dissolved', 'Fish', 'LiveFeeds', 'Mix', 'Pellets') 
+
 ```
 
 #Visualisation set-up

@@ -57,10 +57,7 @@ library(geomtextpath)
 library(ggnewscale)
 library(ggrepel)
 library(ggvegan)
-
 source('../multivar_helperFunctions.R') 
-source('../geom_textsegment.R')
-
 set.seed(42)
 ```
 
@@ -80,7 +77,7 @@ level_names_microbe_new <- c('Field', 'Post - acclimation', 'Control','Pellets',
 phy_2_c <- qza_to_phyloseq("../data/microbes/denoised_table_f255r240.qza", 
                          "../data/microbes/rooted_tree_f255r240.qza",
                          "../data/microbes/taxonomy_majority_341-805-trained_f255r240.qza",
-                         "../data/microbes/metadata_full.tsv")
+                         "../data/microbes/metadata_full.tsv") 
 ```
 
 
