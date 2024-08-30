@@ -71,18 +71,11 @@ data_FA_sum <- data_FA_sum |> mutate(genotype = as.factor(genotype),
                            tank_rand = as.factor(tank_rand))
 coral_FA_sum <- data_FA_sum |> filter(row_number() <= 140) 
 
-FA_PUFA_all <- read_csv('../data/FA_PUFA_all.csv', trim_ws = TRUE) 
-FA_PUFA_all$tank_rand <- paste(FA_PUFA_all$treatment,FA_PUFA_all$tank)
-FA_PUFA_all <- FA_PUFA_all |> dplyr::mutate(treatment = as.factor(treatment), 
-                                            tank_rand = as.factor(tank_rand))
-coral_PUFA <- FA_PUFA_all |> dplyr::filter(type == "coral")
-
 coral_FA_sum <- coral_FA_sum |>  
   dplyr::mutate(LC_PUFA_n3_6 = LC_PUFA_n6 + LC_PUFA_n3, 
                 PUFA_n3_6 = PUFA_n3 + PUFA_n6, 
                 LC_n3n6 = LC_PUFA_n3/LC_PUFA_n6, 
-                PUFA_n3_n6 =  LC_PUFA_n3/LC_PUFA_n6)
-
+                PUFA_n3_n6 =  PUFA_n3/PUFA_n6)
 ```
 
 ##Visualisation set-up
@@ -98,7 +91,11 @@ group.colors.PCA <- c(Control = "#999999", Dissolved = "#E69F00", Fish = "#56B4E
 
 coral_FA_var$treatment <- recode_factor(coral_FA_var$treatment, 
                               Mix = "LiveFeeds + Fish",
-                            SeaSim = "Post-acclimation")
+                            SeaSim = "Post-acclimation") 
+
+level_order_new <- c('Control','Pellets', 'LiveFeeds', 'Dissolved', 'Fish',  'Mix',  'Field', 'SeaSim') 
+group.colors <- c(Control = "#999999", Dissolved = "#E69F00", Fish = "#56B4E9", LiveFeeds = "#009E73", Mix = "#F0E442", Pellets = "#0072B2", Field = "#D55E00", SeaSim = "#CC79A7" )
+
 ```
 
 #PCA
@@ -277,9 +274,9 @@ summary(coral_FA_idsp)
 #| warning: false
 #| message: false
 #| cache: true
-PUFA_form <- bf(PUFA_cal ~ treatment + (1|tank_rand:genotype), family = gaussian()) 
+PUFA_form <- bf(PUFA ~ treatment + (1|tank_rand:genotype), family = gaussian()) 
 
-coral_PUFA |> dplyr::group_by(treatment) |>  dplyr::summarise(median((PUFA_cal)), mad((PUFA_cal))) 
+coral_FA_sum |> dplyr::group_by(treatment) |>  dplyr::summarise(median((PUFA)), mad((PUFA))) 
 
 PUFA_priors <- prior(normal(32.7, 5), class = 'Intercept') + 
   prior(normal(0, 20), class = 'b') + 
@@ -287,7 +284,7 @@ PUFA_priors <- prior(normal(32.7, 5), class = 'Intercept') +
   prior(student_t(3, 0, 4.5), class = 'sigma') 
 
 PUFA.brm1 <- brm(PUFA_form, 
-                 data = coral_PUFA,
+                 data = coral_FA_sum,
                  prior = PUFA_priors, 
                  sample_prior = 'only',
                  iter = 5000, 
@@ -454,7 +451,7 @@ PUFA.calc.brm2 |> emmeans(~treatment) |>
 #| cache: true
 LCPUFA_36_form <- bf(LC_n3n6 ~ treatment + (1|tank_rand:genotype), family = Gamma(link = log), shape ~ treatment) 
 
-coral_FA_sum |> dplyr::group_by(treatment) |> dplyr::summarise(log(median((n3n6))), log(mad((n3n6)))) 
+coral_FA_sum |> dplyr::group_by(treatment) |> dplyr::summarise(log(median((LC_n3n6))), log(mad((LC_n3n6)))) 
 
 LCPUFA_36_priors <- prior(normal(0.7, 1), class = 'Intercept') + 
   prior(normal(0, 0.5), class = 'b') + 
@@ -519,7 +516,7 @@ LCPUFA.brm2$fit |> stan_rhat()
 #ESS
 LCPUFA.brm2$fit |> stan_ess() 
 #Summary
-summary(LCPUFA.brm2) 
+summary(LCPUFA.brm2)  
 ```
 
 ####Posterior probablity checks
@@ -630,7 +627,7 @@ PUFA_36_form <- bf(PUFA_n3_n6 ~ treatment + (1|tank_rand:genotype), family = Gam
 coral_FA_sum |> dplyr::group_by(treatment) |> dplyr::summarise(log(median((PUFA_n3_n6))), log(mad((PUFA_n3_n6)))) 
 
 PUFA_36_priors <- prior(normal(0.6, 1), class = 'Intercept') + 
-  prior(normal(0, 0.6), class = 'b') + 
+  prior(normal(0, 0.5), class = 'b') + 
   prior(student_t(3, 0, 1), class = 'sd') + 
   prior(normal(0, 0.6), class = 'b', dpar = 'shape')
 
@@ -648,7 +645,6 @@ PUFA.brm1 <- brm(PUFA_36_form,
                  backend = "cmdstan") 
 
 PUFA.brm1 |> conditional_effects("treatment") |> plot(points = TRUE)  
-
 #OK
 ```
 
@@ -661,17 +657,17 @@ PUFA.brm1 |> conditional_effects("treatment") |> plot(points = TRUE)
 #| message: false
 #| cache: true
 
-PUFA_m36.brm2 <- PUFA.brm1 |> update(sample_prior = "yes",
+PUFA_n36.brm2 <- PUFA.brm1 |> update(sample_prior = "yes",
                                        refresh = 0, 
                                        iter = 7500,
                                        warmup = 2500,
                                        chains = 3, cores = 3, 
                                        seed = 123) 
 
-PUFA_m36.brm2 |> conditional_effects("treatment") |> plot(points = TRUE)
+PUFA_n36.brm2 |> conditional_effects("treatment") |> plot(points = TRUE)
 
-save(PUFA_m36.brm2, file = "../models/PUFA_m36.brm2.RData")
-load("../models/PUFA_m36.brm2.RData")
+save(PUFA_n36.brm2, file = "../models/PUFA_n36.brm2.RData")
+load("../models/PUFA_n36.brm2.RData") 
 ```
 
 ####MCMC sampling diagnostics
@@ -682,19 +678,19 @@ load("../models/PUFA_m36.brm2.RData")
 #| warning: false
 #| message: false
 #| cache: true 
-pars <- PUFA_m36.brm2 |> get_variables()
+pars <- PUFA_n36.brm2 |> get_variables()
 pars_2 <- str_extract(pars, '^b_.*|^shape*|^sd_.*|^sigma$') |> na.omit() 
 
 #Traceplots
-PUFA_m36.brm2$fit |> stan_trace(pars = pars_2, inc_warmup = TRUE)
+PUFA_n36.brm2$fit |> stan_trace(pars = pars_2, inc_warmup = TRUE)
 #Autocorrelation
-PUFA_m36.brm2$fit |> stan_ac(pars = pars_2) 
+PUFA_n36.brm2$fit |> stan_ac(pars = pars_2) 
 #Rhat
-PUFA_m36.brm2$fit |> stan_rhat()
+PUFA_n36.brm2$fit |> stan_rhat()
 #ESS
-PUFA_m36.brm2$fit |> stan_ess() 
+PUFA_n36.brm2$fit |> stan_ess() 
 #Summary
-summary(PUFA_m36.brm2) 
+summary(PUFA_n36.brm2) 
 ```
 
 ####Posterior probablity checks
@@ -706,7 +702,7 @@ summary(PUFA_m36.brm2)
 #| message: false
 #| cache: true
 
-PUFA_m36.brm2 |> pp_check(type = 'dens_overlay', ndraws = 200) + theme_classic()
+PUFA_n36.brm2 |> pp_check(type = 'dens_overlay', ndraws = 200) + theme_classic()
 #OK
 ```
 
@@ -720,7 +716,7 @@ PUFA_m36.brm2 |> pp_check(type = 'dens_overlay', ndraws = 200) + theme_classic()
 #| message: false
 #| cache: true
 
-coral.resids <- make_brms_dharma_res(PUFA_m36.brm2, integerResponse = FALSE)
+coral.resids <- make_brms_dharma_res(PUFA_n36.brm2, integerResponse = FALSE)
 
 wrap_elements(~testUniformity(coral.resids)) + 
   wrap_elements(~plotResiduals(coral.resids, quantreg = FALSE)) +
@@ -737,9 +733,9 @@ wrap_elements(~testUniformity(coral.resids)) +
 #| warning: false
 #| message: false
 #| cache: true
-load("../models/PUFA_m36.brm2.RData")
+load("../models/PUFA_n36.brm2.RData")
 
-PUFAn36.means <- PUFA_m36.brm2 |> 
+PUFAn36.means <- PUFA_n36.brm2 |> 
   emmeans(~treatment, type = 'response') |> 
   as.data.frame() |> 
   mutate(response = response, 
@@ -773,11 +769,11 @@ ggplot(data = PUFAn36.means, aes(x=factor(treatment, levels = level_order_new), 
 #| cache: true
 (PUFAn36.means)
 
-sTreat <- PUFA_m36.brm2$data |> pull(treatment) |> levels()
+sTreat <- PUFA_n36.brm2$data |> pull(treatment) |> levels()
 STreat <- rep(1, length(sTreat))
 names(STreat) <- sTreat
  
-PUFA_m36.brm2 |> emmeans(~treatment) |> 
+PUFA_n36.brm2 |> emmeans(~treatment) |> 
   gather_emmeans_draws() |>  
   dplyr::mutate(.value = exp(.value)) |> 
   ungroup() |>
